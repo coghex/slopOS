@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+persist_root="/Volumes/slopos-data/opt/dropbear/current"
+
+link_tool() {
+  src="$1"
+  dest="$2"
+
+  rm -f "$dest"
+  ln -s "$src" "$dest"
+}
+
+if [ ! -x "$persist_root/sbin/dropbear" ]; then
+  exit 0
+fi
+
+link_tool "$persist_root/sbin/dropbear" /usr/sbin/dropbear
+
+for tool in dbclient dropbearkey dropbearconvert scp; do
+  if [ -e "$persist_root/bin/$tool" ]; then
+    link_tool "$persist_root/bin/$tool" "/usr/bin/$tool"
+  fi
+done
+
+if [ -e "$persist_root/bin/dbclient" ]; then
+  link_tool "$persist_root/bin/dbclient" /usr/bin/ssh
+fi
+
+echo "Exposed persistent Dropbear from $persist_root"

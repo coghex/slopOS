@@ -1,0 +1,4 @@
+[submodule "linux-vm/buildroot-src"]
+	path = linux-vm/buildroot-src
+	url = https://github.com/buildroot/buildroot.git
+	branch = master

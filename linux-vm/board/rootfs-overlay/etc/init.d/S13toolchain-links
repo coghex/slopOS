@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+link_dir="/usr/bin"
+native_bin="/Volumes/slopos-data/toolchain/native/bin"
+sdk_bin="/Volumes/slopos-data/toolchain/current/bin"
+
+link_tool() {
+  src="$1"
+  dest="$2"
+
+  rm -f "$link_dir/$dest"
+  ln -s "$src" "$link_dir/$dest"
+}
+
+if [ -x "$native_bin/aarch64-linux-gnu-gcc" ]; then
+  link_tool "$native_bin/aarch64-linux-gnu-gcc" gcc
+  link_tool "$native_bin/aarch64-linux-gnu-gcc" cc
+  link_tool "$native_bin/aarch64-linux-gnu-g++" g++
+  link_tool "$native_bin/aarch64-linux-gnu-g++" c++
+  link_tool "$native_bin/aarch64-linux-gnu-cpp" cpp
+  link_tool "$native_bin/aarch64-linux-gnu-gcc" aarch64-linux-gnu-gcc
+  link_tool "$native_bin/aarch64-linux-gnu-g++" aarch64-linux-gnu-g++
+  echo "Exposed native GCC toolchain from $native_bin"
+  exit 0
+fi
+
+if [ -x "$sdk_bin/aarch64-buildroot-linux-gnu-gcc" ]; then
+  link_tool "$sdk_bin/aarch64-buildroot-linux-gnu-gcc" gcc
+  link_tool "$sdk_bin/aarch64-buildroot-linux-gnu-cc" cc
+  link_tool "$sdk_bin/aarch64-buildroot-linux-gnu-g++" g++
+  link_tool "$sdk_bin/aarch64-buildroot-linux-gnu-c++" c++
+  link_tool "$sdk_bin/aarch64-buildroot-linux-gnu-cpp" cpp
+  link_tool "$sdk_bin/aarch64-buildroot-linux-gnu-gcc" aarch64-buildroot-linux-gnu-gcc
+  link_tool "$sdk_bin/aarch64-buildroot-linux-gnu-g++" aarch64-buildroot-linux-gnu-g++
+  echo "Exposed bootstrap GCC toolchain from $sdk_bin"
+fi

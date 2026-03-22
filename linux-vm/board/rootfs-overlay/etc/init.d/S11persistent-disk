@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+device=""
+label="slopos-data"
+blkid_cmd="/sbin/blkid"
+mountpoint="/Volumes/slopos-data"
+attempts=10
+
+mkdir -p /Volumes "$mountpoint"
+
+if [ ! -x "$blkid_cmd" ]; then
+  blkid_cmd="$(command -v blkid 2>/dev/null || true)"
+fi
+
+if [ -z "$blkid_cmd" ]; then
+  echo "blkid is required to identify the persistent disk" >&2
+  exit 1
+fi
+
+while [ "$attempts" -gt 0 ] && [ -z "$device" ]; do
+  for candidate in /dev/vda /dev/vdb; do
+    candidate_label="$("$blkid_cmd" "$candidate" 2>/dev/null | sed -n 's/.*LABEL=\"\([^\"]*\)\".*/\1/p')"
+
+    if [ -b "$candidate" ] &&
+      [ "$candidate_label" = "$label" ]; then
+      device="$candidate"
+      break
+    fi
+  done
+
+  [ -n "$device" ] && break
+  sleep 1
+  attempts=$((attempts - 1))
+done
+
+if [ -z "$device" ]; then
+  echo "Persistent disk device not found" >&2
+  exit 1
+fi
+
+if grep -qs " $mountpoint " /proc/mounts; then
+  exit 0
+fi
+
+echo "Mounting persistent disk $device at $mountpoint"
+mount -t ext4 -o rw,noatime "$device" "$mountpoint"

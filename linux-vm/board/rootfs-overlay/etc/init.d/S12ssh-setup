@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+persist_root="/Volumes/slopos-data/ssh"
+persist_dropbear_dir="$persist_root/dropbear"
+persist_root_ssh_dir="$persist_root/root"
+runtime_root_ssh_dir="/root/.ssh"
+seed_authorized_keys="$runtime_root_ssh_dir/authorized_keys"
+
+mkdir -p "$persist_root" "$persist_dropbear_dir" "$persist_root_ssh_dir" "$runtime_root_ssh_dir"
+chmod 700 "$persist_root" "$persist_dropbear_dir" "$persist_root_ssh_dir" "$runtime_root_ssh_dir"
+
+if [ -d /etc/dropbear ] && [ ! -L /etc/dropbear ]; then
+  rm -rf /etc/dropbear
+fi
+
+ln -snf "$persist_dropbear_dir" /etc/dropbear
+
+if [ ! -f "$persist_root_ssh_dir/authorized_keys" ] && [ -f "$seed_authorized_keys" ]; then
+  cp "$seed_authorized_keys" "$persist_root_ssh_dir/authorized_keys"
+  chmod 600 "$persist_root_ssh_dir/authorized_keys"
+fi
+
+if [ -f "$persist_root_ssh_dir/authorized_keys" ]; then
+  cp "$persist_root_ssh_dir/authorized_keys" "$runtime_root_ssh_dir/authorized_keys"
+  chmod 600 "$runtime_root_ssh_dir/authorized_keys"
+fi

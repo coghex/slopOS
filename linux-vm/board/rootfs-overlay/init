@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+[ -c /dev/console ] || mknod -m 600 /dev/console c 5 1
+[ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
+[ -c /dev/ttyAMA0 ] || mknod -m 600 /dev/ttyAMA0 c 204 64
+
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+
+exec /sbin/init

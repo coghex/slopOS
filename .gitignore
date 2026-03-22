@@ -1,0 +1,15 @@
+.DS_Store
+
+# Generated Buildroot output and exported toolchains
+linux-vm/artifacts/buildroot-output/
+linux-vm/artifacts/toolchain/
+
+# Local VM runtime state
+linux-vm/qemu/*.img
+linux-vm/qemu/known_hosts
+linux-vm/qemu/guest-ssh-identity.path
+linux-vm/board/rootfs-overlay/root/.ssh/authorized_keys
+
+# Common editor noise
+.vscode/
+.idea/
