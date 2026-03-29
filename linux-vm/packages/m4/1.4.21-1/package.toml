@@ -1,0 +1,24 @@
+[package]
+name = "m4"
+version = "1.4.21"
+release = 1
+summary = "GNU macro processor"
+description = "GNU m4 macro processor used by parser generators and other build tooling."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/m4/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.xz"
+sha256 = "f25c6ab51548a73a75558742fb031e0625d6485fe5f9155949d6486a2408ab66"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

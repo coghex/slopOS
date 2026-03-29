@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+persist_bin="/Volumes/slopos-data/opt/sloppkg/current/bin/sloppkg"
+link_path="/usr/local/bin/sloppkg"
+
+if [ ! -x "$persist_bin" ]; then
+  exit 0
+fi
+
+mkdir -p "$(dirname "$link_path")"
+rm -f "$link_path"
+ln -s "$persist_bin" "$link_path"
+
+echo "Exposed persistent sloppkg from $persist_bin"

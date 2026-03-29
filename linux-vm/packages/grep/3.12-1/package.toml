@@ -1,0 +1,24 @@
+[package]
+name = "grep"
+version = "3.12"
+release = 1
+summary = "GNU grep"
+description = "Pattern matching tools used throughout builds, packaging, and guest maintenance."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/grep/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz"
+sha256 = "2649b27c0e90e632eadcd757be06c6e9a4f48d941de51e7c0f83ff76408a07b9"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local", "--disable-perl-regexp"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

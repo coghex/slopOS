@@ -1,0 +1,29 @@
+[package]
+name = "libpng"
+version = "1.6.44"
+release = 1
+summary = "PNG reference library"
+description = "Library for manipulating PNG images."
+license = "Libpng"
+homepage = "https://libpng.org"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://download.sourceforge.net/libpng/libpng-1.6.44.tar.xz"
+sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "zlib"
+constraint = ">= 1.3.0-1"
+kind = "runtime"

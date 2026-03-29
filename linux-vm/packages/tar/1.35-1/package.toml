@@ -1,0 +1,42 @@
+[package]
+name = "tar"
+version = "1.35"
+release = 1
+summary = "GNU tar archive utility"
+description = "Managed archive creation and extraction so day-to-day guest workflows can rely on package-managed tar under /usr/local."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/tar/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftpmirror.gnu.org/tar/tar-1.35.tar.xz"
+sha256 = "4d62ff37342ec7aed748535323930c7cf94acf71c3591882b26a7ea50f3edc16"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--prefix=/usr/local",
+  "--disable-year2038",
+  "--without-posix-acls",
+  "--without-xattrs",
+]
+
+[build.env]
+FORCE_UNSAFE_CONFIGURE = "1"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "gzip"
+constraint = ">= 1.14-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "xz"
+constraint = ">= 5.8.2-1"
+kind = "runtime"

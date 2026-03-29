@@ -1,0 +1,30 @@
+[package]
+name = "traceroute"
+version = "2.1.6"
+release = 1
+summary = "Packet route tracing tool"
+description = "Managed traceroute implementation so the guest no longer depends on the BusyBox traceroute applet."
+license = "GPL-2.0+, LGPL-2.1+"
+homepage = "https://traceroute.sourceforge.net/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://downloads.sourceforge.net/project/traceroute/traceroute/traceroute-2.1.6/traceroute-2.1.6.tar.gz"
+sha256 = "9ccef9cdb9d7a98ff7fbf93f79ebd0e48881664b525c4b232a0fcec7dcb9db5e"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = false
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

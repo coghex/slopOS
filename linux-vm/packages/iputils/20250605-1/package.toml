@@ -1,0 +1,40 @@
+[package]
+name = "iputils"
+version = "20250605"
+release = 1
+summary = "ICMP echo tools"
+description = "Managed iputils build providing source-built ping so the guest no longer depends on the BusyBox ping applet."
+license = "GPL-2.0+, BSD-3-Clause"
+homepage = "https://github.com/iputils/iputils"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://github.com/iputils/iputils/releases/download/20250605/iputils-20250605.tar.gz"
+sha256 = "475c643e5f55b302286267b97d3ce0f47ca3489ced8aa0401b1eeb1e68228d6b"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = false
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "meson"
+constraint = ">= 1.10.1-1"
+kind = "build"
+
+[[dependencies]]
+name = "ninja"
+constraint = ">= 1.13.2-1"
+kind = "build"

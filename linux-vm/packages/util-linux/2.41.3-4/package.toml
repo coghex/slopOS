@@ -1,0 +1,90 @@
+[package]
+name = "util-linux"
+version = "2.41.3"
+release = 4
+summary = "Mount and block-device utility stack"
+description = "Managed util-linux slice providing source-built mount, umount, mountpoint, findmnt, blkid, agetty, and their supporting libraries under /usr/local."
+license = "GPL-2.0+, BSD-4-Clause, LGPL-2.1+, BSD-3-Clause, BSD-2-Clause, ISC, MIT"
+homepage = "https://www.kernel.org/pub/linux/utils/util-linux/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v2.41/util-linux-2.41.3.tar.xz"
+sha256 = "3330d873f0fceb5560b89a7dc14e4f3288bbd880e96903ed9b50ec2b5799e58b"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--prefix=/usr/local",
+  "--disable-asciidoc",
+  "--disable-makeinstall-chown",
+  "--disable-poman",
+  "--disable-rpath",
+  "--disable-year2038",
+  "--disable-nls",
+  "--without-systemd",
+  "--with-systemdsystemunitdir=no",
+  "--without-udev",
+  "--without-ncurses",
+  "--without-ncursesw",
+  "--without-selinux",
+  "--without-audit",
+  "--without-readline",
+  "--without-libmagic",
+  "--without-python",
+  "--disable-pylibmount",
+  "--disable-liblastlog2",
+  "--enable-agetty",
+  "--disable-chfn-chsh",
+  "--disable-chmem",
+  "--disable-ipcmk",
+  "--disable-kill",
+  "--disable-login",
+  "--disable-lsfd",
+  "--disable-lslogins",
+  "--disable-mesg",
+  "--disable-more",
+  "--disable-newgrp",
+  "--disable-nologin",
+  "--disable-nsenter",
+  "--disable-pg",
+  "--disable-rfkill",
+  "--disable-runuser",
+  "--disable-schedutils",
+  "--disable-setpriv",
+  "--disable-setterm",
+  "--disable-su",
+  "--disable-sulogin",
+  "--disable-tunelp",
+  "--disable-ul",
+  "--disable-unshare",
+  "--disable-uuidd",
+  "--disable-vipw",
+  "--disable-wall",
+  "--disable-wdctl",
+  "--disable-write",
+  "--disable-zramctl",
+  "--enable-libblkid",
+  "--enable-libmount",
+  "--enable-libuuid",
+  "--enable-blkid",
+  "--enable-mount",
+  "--enable-mountpoint",
+]
+
+[build.env]
+CPPFLAGS = "-I/usr/local/include"
+LDFLAGS = "-L/usr/local/lib"
+PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "pkgconf"
+constraint = ">= 2.3.0-1"
+kind = "build"

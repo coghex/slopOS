@@ -1,0 +1,101 @@
+#!/bin/sh
+set -eu
+
+repointed=0
+pruned=0
+
+prune_stale() {
+    target="$1"
+
+    if [ ! -L "$target" ]; then
+        return 0
+    fi
+
+    current="$(readlink -f "$target" 2>/dev/null || true)"
+    if [ "$current" = "/bin/busybox" ] || [ ! -e "$target" ]; then
+        rm -f "$target"
+        pruned=1
+    fi
+}
+
+reconcile_managed() {
+    managed="$1"
+    target="$2"
+
+    if [ -x "$managed" ]; then
+        if [ -e "$target" ] && [ ! -L "$target" ]; then
+            return 0
+        fi
+
+        current="$(readlink -f "$target" 2>/dev/null || true)"
+        if [ "$current" = "$managed" ]; then
+            return 0
+        fi
+
+        ln -snf "$managed" "$target"
+        repointed=1
+        return 0
+    fi
+
+    if [ ! -L "$target" ]; then
+        return 0
+    fi
+
+    current="$(readlink -f "$target" 2>/dev/null || true)"
+    link_target="$(readlink "$target" 2>/dev/null || true)"
+    if [ "$current" = "/bin/busybox" ] || [ "$current" = "$managed" ] || [ "$link_target" = "$managed" ]; then
+        rm -f "$target"
+        pruned=1
+    fi
+}
+
+reconcile_managed /usr/local/bin/less /usr/bin/less
+reconcile_managed /usr/local/bin/base32 /bin/base32
+reconcile_managed /usr/local/bin/dmesg /bin/dmesg
+reconcile_managed /usr/local/bin/getopt /bin/getopt
+reconcile_managed /usr/local/bin/linux32 /bin/linux32
+reconcile_managed /usr/local/bin/linux64 /bin/linux64
+reconcile_managed /usr/local/bin/ping /bin/ping
+reconcile_managed /usr/local/bin/setarch /bin/setarch
+reconcile_managed /usr/local/bin/which /usr/bin/which
+reconcile_managed /usr/local/bin/telnet /usr/bin/telnet
+reconcile_managed /usr/local/bin/traceroute /usr/bin/traceroute
+reconcile_managed /usr/local/bin/nslookup /usr/bin/nslookup
+reconcile_managed /usr/local/bin/clear /usr/bin/clear
+reconcile_managed /usr/local/bin/eject /usr/bin/eject
+reconcile_managed /usr/local/bin/fallocate /usr/bin/fallocate
+reconcile_managed /usr/local/bin/flock /usr/bin/flock
+reconcile_managed /usr/local/bin/gzip /bin/gzip
+reconcile_managed /usr/local/bin/gunzip /bin/gunzip
+reconcile_managed /usr/local/bin/zcat /bin/zcat
+reconcile_managed /usr/local/bin/hexdump /usr/bin/hexdump
+reconcile_managed /usr/local/bin/ipcrm /usr/bin/ipcrm
+reconcile_managed /usr/local/bin/ipcs /usr/bin/ipcs
+reconcile_managed /usr/local/bin/last /usr/bin/last
+reconcile_managed /usr/local/bin/logger /usr/bin/logger
+reconcile_managed /usr/local/bin/renice /usr/bin/renice
+reconcile_managed /usr/local/bin/reset /usr/bin/reset
+reconcile_managed /usr/local/bin/setsid /usr/bin/setsid
+reconcile_managed /usr/local/bin/uptime /usr/bin/uptime
+reconcile_managed /usr/local/sbin/fsfreeze /usr/sbin/fsfreeze
+reconcile_managed /usr/local/sbin/readprofile /usr/sbin/readprofile
+reconcile_managed /usr/local/sbin/fdisk /sbin/fdisk
+reconcile_managed /usr/local/sbin/fstrim /sbin/fstrim
+reconcile_managed /usr/local/sbin/hwclock /sbin/hwclock
+reconcile_managed /usr/local/bin/ip /sbin/ip
+reconcile_managed /usr/local/sbin/losetup /sbin/losetup
+
+prune_stale /sbin/ipaddr
+prune_stale /sbin/iplink
+prune_stale /sbin/ipneigh
+prune_stale /sbin/iproute
+prune_stale /sbin/iprule
+prune_stale /sbin/iptunnel
+
+if [ "$repointed" -eq 1 ]; then
+    echo "Repointed selected legacy userland paths to managed /usr/local binaries"
+fi
+
+if [ "$pruned" -eq 1 ]; then
+    echo "Pruned stale legacy userland paths without managed providers"
+fi

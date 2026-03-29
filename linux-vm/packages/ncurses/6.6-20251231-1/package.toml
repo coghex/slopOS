@@ -1,0 +1,54 @@
+[package]
+name = "ncurses"
+version = "6.6-20251231"
+release = 1
+summary = "Terminal handling library"
+description = "Terminal display, input, and terminfo library and utilities."
+license = "MIT with advertising clause"
+homepage = "https://invisible-island.net/ncurses/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://github.com/ThomasDickey/ncurses-snapshots/archive/v6_6_20251231.tar.gz"
+filename = "ncurses-6.6-20251231.tar.gz"
+sha256 = "9796dfb0e790bac2a994a86df83adddc1a96021cbc02c44c4f2ea886069bd91d"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--prefix=/usr/local",
+  "--without-cxx",
+  "--without-cxx-binding",
+  "--without-ada",
+  "--without-tests",
+  "--disable-big-core",
+  "--without-profile",
+  "--disable-rpath",
+  "--disable-rpath-hack",
+  "--enable-echo",
+  "--enable-const",
+  "--enable-overwrite",
+  "--enable-pc-files",
+  "--disable-stripping",
+  "--with-pkg-config-libdir=/usr/local/lib/pkgconfig",
+  "--with-shared",
+  "--with-normal",
+  "--enable-ext-colors",
+  "--without-manpages",
+  "--without-gpm",
+]
+install = [
+  "make DESTDIR=\"$PKG_DESTDIR\" install",
+  "if [[ -f \"$PKG_DESTDIR/usr/local/bin/ncurses6-config\" ]] && [[ ! -e \"$PKG_DESTDIR/usr/local/bin/ncurses-config\" ]]; then ln -sf ncurses6-config \"$PKG_DESTDIR/usr/local/bin/ncurses-config\"; fi",
+  "if [[ -f \"$PKG_DESTDIR/usr/local/lib/libncursesw.so\" ]] && [[ ! -e \"$PKG_DESTDIR/usr/local/lib/libncurses.so\" ]]; then ln -sf libncursesw.so \"$PKG_DESTDIR/usr/local/lib/libncurses.so\"; fi",
+  "if [[ -f \"$PKG_DESTDIR/usr/local/lib/libncursesw.so.6\" ]] && [[ ! -e \"$PKG_DESTDIR/usr/local/lib/libncurses.so.6\" ]]; then ln -sf libncursesw.so.6 \"$PKG_DESTDIR/usr/local/lib/libncurses.so.6\"; fi",
+  "if [[ -f \"$PKG_DESTDIR/usr/local/lib/libncursesw.a\" ]] && [[ ! -e \"$PKG_DESTDIR/usr/local/lib/libncurses.a\" ]]; then ln -sf libncursesw.a \"$PKG_DESTDIR/usr/local/lib/libncurses.a\"; fi",
+  "if [[ -f \"$PKG_DESTDIR/usr/local/lib/pkgconfig/ncursesw.pc\" ]] && [[ ! -e \"$PKG_DESTDIR/usr/local/lib/pkgconfig/ncurses.pc\" ]]; then ln -sf ncursesw.pc \"$PKG_DESTDIR/usr/local/lib/pkgconfig/ncurses.pc\"; fi",
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

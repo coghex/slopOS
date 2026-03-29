@@ -1,0 +1,34 @@
+[package]
+name = "curl"
+version = "8.12.1"
+release = 1
+summary = "Data transfer tool and library"
+description = "Command-line data transfer tool with pluggable TLS support."
+license = "curl"
+homepage = "https://curl.se"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://curl.se/download/curl-8.12.1.tar.xz"
+sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "zlib"
+constraint = ">= 1.3.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "tls-provider"
+constraint = ">= 1-0"
+kind = "runtime"

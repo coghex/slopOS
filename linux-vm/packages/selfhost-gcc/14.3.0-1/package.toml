@@ -1,0 +1,86 @@
+[package]
+name = "selfhost-gcc"
+version = "14.3.0"
+release = 1
+summary = "Managed final self-host GCC"
+description = "Builds and stages the final self-host GCC/G++ under /Volumes/slopos-data/toolchain/selfhost-final and exposes stable gcc/g++ entrypoints under /usr/bin and /usr/local/bin."
+license = "GPL-3.0-or-later"
+homepage = "https://gcc.gnu.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/gcc/gcc-14.3.0/gcc-14.3.0.tar.xz"
+filename = "gcc-14.3.0.tar.xz"
+sha256 = "0941d71cf8aec766b52a0a733719764dd0c7b17039f15a2dfa56d5b2012c017d"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/Volumes/slopos-data/toolchain/selfhost-sysroot"
+owned_prefixes = ["/Volumes/slopos-data/toolchain/selfhost-sysroot", "/usr/bin", "/usr/local/bin"]
+
+[[dependencies]]
+name = "selfhost-binutils"
+constraint = ">= 2.45.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-gmp"
+constraint = ">= 6.3.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-mpfr"
+constraint = ">= 4.1.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-mpc"
+constraint = ">= 1.3.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-glibc"
+constraint = ">= 2.43-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-gcc-stage2"
+constraint = ">= 14.3.0-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-binutils"
+constraint = ">= 2.45.1-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-gmp"
+constraint = ">= 6.3.0-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-mpfr"
+constraint = ">= 4.1.1-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-mpc"
+constraint = ">= 1.3.1-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-glibc"
+constraint = ">= 2.43-1"
+kind = "build"

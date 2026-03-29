@@ -1,0 +1,53 @@
+[package]
+name = "sqlite"
+version = "3.51.3"
+release = 1
+summary = "Embedded SQL database engine"
+description = "Self-contained SQL database engine with readline-enabled shell support."
+license = "blessing"
+homepage = "https://sqlite.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://www.sqlite.org/2026/sqlite-autoconf-3510300.tar.gz"
+sha256 = "81f5be397049b0cae1b167f2225af7646fc0f82e4a9b3c48c9ea3a533e21d77a"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = false
+configure = [
+  "--prefix=/usr/local",
+  "--disable-rpath",
+  "--soname=legacy",
+]
+
+[build.env]
+CPPFLAGS = "-I/usr/local/include -DHAVE_READLINE=1"
+LDFLAGS = "-L/usr/local/lib -lreadline -lncursesw"
+PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "ncurses"
+constraint = ">= 6.6-20251231-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "readline"
+constraint = ">= 8.3-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "ncurses"
+constraint = ">= 6.6-20251231-1"
+kind = "build"
+
+[[dependencies]]
+name = "readline"
+constraint = ">= 8.3-1"
+kind = "build"

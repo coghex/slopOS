@@ -1,0 +1,36 @@
+[package]
+name = "selfhost-world"
+version = "0.1.0"
+release = 1
+summary = "Canonical managed guest world package"
+description = "Meta package for converging a reseeded guest to the intended full self-hosted state: base userland, development tools, network tools, and the self-hosted toolchain."
+license = "MIT"
+architectures = ["aarch64"]
+
+[build]
+system = "custom"
+out_of_tree = true
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "selfhost-base"
+constraint = ">= 0.1.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-devel"
+constraint = ">= 0.1.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-network"
+constraint = ">= 0.1.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-toolchain"
+constraint = ">= 14.3.0-1"
+kind = "runtime"

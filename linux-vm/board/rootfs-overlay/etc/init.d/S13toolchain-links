@@ -2,6 +2,7 @@
 set -eu
 
 link_dir="/usr/bin"
+final_bin="/Volumes/slopos-data/toolchain/selfhost-sysroot/final/bin"
 native_bin="/Volumes/slopos-data/toolchain/native/bin"
 sdk_bin="/Volumes/slopos-data/toolchain/current/bin"
 
@@ -12,6 +13,18 @@ link_tool() {
   rm -f "$link_dir/$dest"
   ln -s "$src" "$link_dir/$dest"
 }
+
+if [ -x "$final_bin/aarch64-linux-gnu-gcc" ]; then
+  link_tool "$final_bin/selfhost-gcc" gcc
+  link_tool "$final_bin/selfhost-gcc" cc
+  link_tool "$final_bin/selfhost-g++" g++
+  link_tool "$final_bin/selfhost-g++" c++
+  link_tool "$final_bin/cpp" cpp
+  link_tool "$final_bin/selfhost-gcc" aarch64-linux-gnu-gcc
+  link_tool "$final_bin/selfhost-g++" aarch64-linux-gnu-g++
+  echo "Exposed selfhost final GCC toolchain from $final_bin"
+  exit 0
+fi
 
 if [ -x "$native_bin/aarch64-linux-gnu-gcc" ]; then
   link_tool "$native_bin/aarch64-linux-gnu-gcc" gcc

@@ -1,0 +1,41 @@
+[package]
+name = "selfhost-mpfr"
+version = "4.1.1"
+release = 1
+summary = "Managed self-host MPFR"
+description = "Builds and stages MPFR into the managed self-host toolchain prefix under /Volumes/slopos-data/toolchain/selfhost-stage1."
+license = "LGPL-3.0-or-later"
+homepage = "https://www.mpfr.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://www.mpfr.org/mpfr-4.1.1/mpfr-4.1.1.tar.xz"
+filename = "mpfr-4.1.1.tar.xz"
+sha256 = "ffd195bd567dbaffc3b98b23fd00aad0537680c9896171e44fe3ff79e28ac33d"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/Volumes/slopos-data/toolchain/selfhost-sysroot"
+owned_prefixes = ["/Volumes/slopos-data/toolchain/selfhost-sysroot"]
+
+[[dependencies]]
+name = "selfhost-gmp"
+constraint = ">= 6.3.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-gmp"
+constraint = ">= 6.3.0-1"
+kind = "build"

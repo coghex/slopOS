@@ -1,0 +1,30 @@
+[package]
+name = "pcre2"
+version = "10.47"
+release = 2
+summary = "Perl-compatible regular expression library"
+description = "PCRE2 runtime and development files needed by the managed nmap package."
+license = "BSD-3-Clause"
+homepage = "https://github.com/PCRE2Project/pcre2"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.bz2"
+sha256 = "47fe8c99461250d42f89e6e8fdaeba9da057855d06eb7fc08d9ca03fd08d7bc7"
+strip_components = 1
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

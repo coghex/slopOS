@@ -1,0 +1,25 @@
+[package]
+name = "dash"
+version = "0.5.13.1"
+release = 1
+summary = "Small POSIX shell"
+description = "Managed dash shell staged under /usr/local/bin as the candidate replacement for BusyBox /bin/sh during the de-BusyBox boot-path migration."
+license = "BSD-3-Clause, GPL-2.0+ (mksignames.c)"
+homepage = "http://gondor.apana.org.au/~herbert/dash/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.13.1.tar.gz"
+sha256 = "d9271bce09c127d9866e25c011582ddc75ab988958a04bc4d8553a3b8f30e370"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local", "--without-libedit", "--disable-static"]
+jobs = 1
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

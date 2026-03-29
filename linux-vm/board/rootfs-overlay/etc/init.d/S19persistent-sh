@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+managed_sh=""
+
+if [ -x /usr/local/bin/dash ]; then
+  managed_sh="/usr/local/bin/dash"
+elif [ -x /bin/dash ]; then
+  managed_sh="/bin/dash"
+fi
+
+if [ -z "$managed_sh" ]; then
+  exit 0
+fi
+
+ln -snf "$managed_sh" /bin/sh
+
+if [ -L /bin/ash ] && [ "$(readlink -f /bin/ash)" = "/bin/busybox" ]; then
+  rm -f /bin/ash
+fi
+
+if [ -f /etc/shells ] && grep -qx '/bin/ash' /etc/shells; then
+  grep -vx '/bin/ash' /etc/shells > /etc/shells.tmp
+  mv /etc/shells.tmp /etc/shells
+fi
+
+echo "Repointed /bin/sh to managed dash and removed BusyBox ash"

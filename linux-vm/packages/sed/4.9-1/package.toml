@@ -1,0 +1,24 @@
+[package]
+name = "sed"
+version = "4.9"
+release = 1
+summary = "GNU stream editor"
+description = "Stream editor for scripted text rewriting during package builds and system maintenance."
+license = "GPL-3.0"
+homepage = "https://www.gnu.org/software/sed/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/sed/sed-4.9.tar.xz"
+sha256 = "6e226b732e1cd739464ad6862bd1a1aba42d7982922da7a53519631d24975181"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

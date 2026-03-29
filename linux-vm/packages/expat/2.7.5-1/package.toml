@@ -1,0 +1,30 @@
+[package]
+name = "expat"
+version = "2.7.5"
+release = 1
+summary = "Streaming XML parser library"
+description = "Fast non-validating XML parser library."
+license = "MIT"
+homepage = "https://libexpat.github.io/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://github.com/libexpat/libexpat/releases/download/R_2_7_5/expat-2.7.5.tar.xz"
+sha256 = "1032dfef4ff17f70464827daa28369b20f6584d108bc36f17ab1676e1edd2f91"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--prefix=/usr/local",
+  "--without-docbook",
+  "--without-examples",
+  "--without-tests",
+  "--without-xmlwf",
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

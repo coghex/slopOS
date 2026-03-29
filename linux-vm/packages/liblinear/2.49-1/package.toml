@@ -1,0 +1,30 @@
+[package]
+name = "liblinear"
+version = "2.49"
+release = 1
+summary = "Linear classification library"
+description = "Shared liblinear runtime needed by the managed nmap build."
+license = "BSD-3-Clause"
+homepage = "https://www.csie.ntu.edu.tw/~cjlin/liblinear/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://www.csie.ntu.edu.tw/~cjlin/liblinear/oldfiles/liblinear-2.49.tar.gz"
+sha256 = "166ca3c741b2207a74978cdb55077261be43b1e58e55f2b4c4f40e6ec1d8a347"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = false
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

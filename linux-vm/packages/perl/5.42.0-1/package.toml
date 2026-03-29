@@ -1,0 +1,30 @@
+[package]
+name = "perl"
+version = "5.42.0"
+release = 1
+summary = "Perl 5 interpreter and core tooling"
+description = "Managed Perl 5 interpreter and core build tooling so package recipes no longer depend on the seeded base image copy."
+license = "Artistic-1.0-Perl, GPL-1.0-or-later"
+homepage = "https://www.perl.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://www.cpan.org/src/5.0/perl-5.42.0.tar.xz"
+sha256 = "73cf6cc1ea2b2b1c110a18c14bbbc73a362073003893ffcedc26d22ebdbdd0c3"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = false
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

@@ -1,0 +1,45 @@
+[package]
+name = "iproute2"
+version = "6.17.0"
+release = 1
+summary = "Linux routing and socket inspection tools"
+description = "Managed iproute2 userland providing source-built replacements for BusyBox-backed networking commands such as ip and ss."
+license = "GPL-2.0+"
+homepage = "https://wiki.linuxfoundation.org/networking/iproute2"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://mirrors.edge.kernel.org/pub/linux/utils/net/iproute2/iproute2-6.17.0.tar.xz"
+sha256 = "9781e59410ab7dea8e9f79bb10ff1488e63d10fcbb70503b94426ba27a8e2dec"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = false
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "bison"
+constraint = ">= 3.8.2-1"
+kind = "build"
+
+[[dependencies]]
+name = "flex"
+constraint = ">= 2.6.4-1"
+kind = "build"
+
+[[dependencies]]
+name = "pkgconf"
+constraint = ">= 2.3.0-1"
+kind = "build"

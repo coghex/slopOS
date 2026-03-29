@@ -1,0 +1,52 @@
+[package]
+name = "libpcap"
+version = "1.10.5"
+release = 1
+summary = "Packet capture library"
+description = "Packet capture library and pcap-config helper needed by managed packet-inspection tools."
+license = "BSD-3-Clause"
+homepage = "https://www.tcpdump.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://www.tcpdump.org/release/libpcap-1.10.5.tar.gz"
+sha256 = "37ced90a19a302a7f32e458224a00c365c117905c2cd35ac544b6880a81488f0"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--prefix=/usr/local",
+  "--disable-yydebug",
+  "--with-pcap=linux",
+  "--without-dag",
+  "--without-dpdk",
+  "--disable-dbus",
+  "--disable-bluetooth",
+  "--without-libnl",
+]
+
+[build.env]
+ac_cv_header_linux_wireless_h = "yes"
+ac_cv_prog_cc_c99 = "-std=gnu99"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "bison"
+constraint = ">= 3.8.2-1"
+kind = "build"
+
+[[dependencies]]
+name = "flex"
+constraint = ">= 2.6.4-1"
+kind = "build"
+
+[[dependencies]]
+name = "pkgconf"
+constraint = ">= 2.3.0-1"
+kind = "build"

@@ -1,0 +1,31 @@
+[package]
+name = "selfhost-gmp"
+version = "6.3.0"
+release = 1
+summary = "Managed self-host GMP"
+description = "Builds and stages GMP into the managed self-host toolchain prefix under /Volumes/slopos-data/toolchain/selfhost-stage1."
+license = "LGPL-3.0-or-later"
+homepage = "https://gmplib.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
+filename = "gmp-6.3.0.tar.xz"
+sha256 = "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/Volumes/slopos-data/toolchain/selfhost-sysroot"
+owned_prefixes = ["/Volumes/slopos-data/toolchain/selfhost-sysroot"]

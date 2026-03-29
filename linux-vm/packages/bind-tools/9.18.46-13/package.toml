@@ -1,0 +1,65 @@
+[package]
+name = "bind-tools"
+version = "9.18.46"
+release = 13
+summary = "DNS query client tools"
+description = "Managed BIND tools build providing dig, host, nslookup, and nsupdate without introducing the named server stack."
+license = "MPL-2.0"
+homepage = "https://www.isc.org/bind/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.isc.org/isc/bind9/9.18.46/bind-9.18.46.tar.xz"
+sha256 = "6b59f0de30c6901cce783007d06f7dd717ec3aa74b5bb5cc5159f93f0be4fc1d"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "libuv"
+constraint = ">= 1.52.1-3"
+kind = "runtime"
+
+[[dependencies]]
+name = "openssl"
+constraint = ">= 3.6.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "zlib"
+constraint = ">= 1.3.2-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "libuv"
+constraint = ">= 1.52.1-3"
+kind = "build"
+
+[[dependencies]]
+name = "openssl"
+constraint = ">= 3.6.1-1"
+kind = "build"
+
+[[dependencies]]
+name = "zlib"
+constraint = ">= 1.3.2-1"
+kind = "build"
+
+[[dependencies]]
+name = "pkgconf"
+constraint = ">= 2.3.0-1"
+kind = "build"

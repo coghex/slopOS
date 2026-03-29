@@ -1,0 +1,30 @@
+[package]
+name = "dropbear"
+version = "2025.89"
+release = 1
+summary = "Persistent Dropbear SSH suite"
+description = "Builds Dropbear under /Volumes/slopos-data/opt/dropbear/current so the guest boot overlay can expose it at runtime."
+license = "MIT, BSD-2-Clause, Public domain"
+homepage = "https://matt.ucc.asn.au/dropbear/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://matt.ucc.asn.au/dropbear/releases/dropbear-2025.89.tar.bz2"
+sha256 = "0d1f7ca711cfc336dc8a85e672cab9cfd8223a02fe2da0a4a7aeb58c9e113634"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/Volumes/slopos-data/opt/dropbear/current"
+owned_prefixes = ["/Volumes/slopos-data/opt/dropbear/current"]

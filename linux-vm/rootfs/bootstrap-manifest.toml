@@ -1,0 +1,123 @@
+schema_version = 2
+name = "slopos-bootstrap"
+
+[ownership]
+managed_root_prefix = "/usr/local"
+managed_root_prefix_status = "current contract"
+reseed_model = "RESET_ROOT_DISK=1 may erase rootfs state under /, but it must not erase /Volumes/slopos-data state or the managed payloads stored there."
+notes = [
+  "Moving managed packages from /usr/local into /usr would be a separate boundary change, not an implicit part of the current roadmap.",
+  "The seed image remains responsible for booting the machine and reconnecting persistent state; sloppkg remains responsible for the long-term managed world.",
+]
+
+[seed_image]
+owner = "buildroot-plus-rootfs-overlay"
+artifacts = [
+  "kernel",
+  "seed-rootfs",
+  "recovery-initramfs",
+]
+responsibilities = [
+  "boot the kernel and mount the seeded root filesystem",
+  "provide init, device bring-up, and first-boot shell/network baseline",
+  "provide HTTPS bootstrap transport through wget, Python ssl, and CA certificates",
+  "mount /Volumes/slopos-data and reconnect persistent state during boot",
+  "run the S11-S16 boot glue that exposes the persistent toolchain, sloppkg, dropbear, ssh state, and runtime-library links",
+]
+immutable_services = [
+  "normal boot path",
+  "recovery boot path",
+  "persistent-disk discovery and mount",
+  "boot-time ssh authorization bootstrap",
+]
+notes = [
+  "The seed image may ship baseline copies of tools that are later replaced or shadowed by persistent managed payloads.",
+  "Recovery stays intentionally tiny and independent from the managed root world.",
+]
+
+[managed_world]
+owner = "sloppkg"
+root_prefixes = [
+  "/usr/local",
+]
+runtime_linker_strategy = "S15local-lib-links mirrors shared libraries from /usr/local/lib and /usr/local/lib64 into /usr/lib64"
+persistent_prefixes = [
+  "/Volumes/slopos-data/opt/dropbear/current",
+  "/Volumes/slopos-data/opt/sloppkg/current",
+]
+minimum_recoverable_world = [
+  "sloppkg",
+  "selfhost-toolchain",
+  "dropbear",
+  "zlib",
+  "xz",
+  "pkgconf",
+  "libffi",
+  "openssl",
+  "expat",
+  "ncurses",
+  "readline",
+  "sqlite",
+  "zstd",
+  "curl",
+]
+notes = [
+  "For now, root-owned managed files live under /usr/local rather than /usr.",
+  "The current runtime ABI contract is that managed shared libraries remain in /usr/local/lib* and S15local-lib-links re-exposes them under /usr/lib64 for the system dynamic linker.",
+  "Persistent service payloads may live under /Volumes/slopos-data/opt/... and be surfaced back into the root filesystem by boot glue.",
+  "The minimum recoverable world is the package set that must be reinstallable after RESET_ROOT_DISK=1 without live guest surgery.",
+]
+
+[persistent_state]
+owner = "persistent-data-disk"
+mountpoint = "/Volumes/slopos-data"
+paths = [
+  "/Volumes/slopos-data/packages",
+  "/Volumes/slopos-data/pkg",
+  "/Volumes/slopos-data/toolchain",
+  "/Volumes/slopos-data/opt/dropbear/current",
+  "/Volumes/slopos-data/opt/sloppkg/current",
+  "/Volumes/slopos-data/ssh",
+]
+notes = [
+  "This disk is the durable handoff between root reseeds: it holds the recipe repo, package-manager state, cached archives, persistent service payloads, ssh state, and selfhost toolchain.",
+  "Normal root resets are expected to preserve this disk intact.",
+]
+
+[stage0]
+owner = "buildroot"
+purpose = "Boot the guest and provide a recovery path that does not depend on the managed root filesystem."
+artifacts = [
+  "kernel",
+  "seed-rootfs",
+  "recovery-initramfs",
+  "boot-glue",
+]
+
+[stage1]
+owner = "sloppkg"
+purpose = "Expose persistent managed payloads and restore the minimum recoverable world after a root reseed."
+world = [
+  "sloppkg",
+  "selfhost-toolchain",
+  "dropbear",
+  "zlib",
+  "xz",
+  "pkgconf",
+  "libffi",
+  "openssl",
+  "expat",
+  "ncurses",
+  "readline",
+  "sqlite",
+  "zstd",
+  "curl",
+]
+
+[stage2]
+owner = "sloppkg"
+purpose = "Expand package ownership beyond the recoverable base world and progressively replace more Buildroot-provided userland with sloppkg-managed packages."
+notes = [
+  "Do not remove seed-image responsibilities until the guest can recover and reboot cleanly using only the managed world plus the remaining boot glue.",
+  "Recovery stays intentionally tiny and does not grow beyond the approved command set without an explicit scope change.",
+]

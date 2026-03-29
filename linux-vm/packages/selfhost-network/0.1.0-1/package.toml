@@ -1,0 +1,46 @@
+[package]
+name = "selfhost-network"
+version = "0.1.0"
+release = 1
+summary = "Managed self-host network tools world package"
+description = "Meta package for the canonical network troubleshooting and transfer tools expected on the guest."
+license = "MIT"
+architectures = ["aarch64"]
+
+[build]
+system = "custom"
+out_of_tree = true
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "iproute2"
+constraint = ">= 6.17.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "iputils"
+constraint = ">= 20250605-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "netcat"
+constraint = ">= 0.7.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "telnet"
+constraint = ">= 2.6-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "traceroute"
+constraint = ">= 2.1.6-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "wget"
+constraint = ">= 1.25.0-1"
+kind = "runtime"

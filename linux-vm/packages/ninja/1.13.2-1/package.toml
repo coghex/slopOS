@@ -1,0 +1,31 @@
+[package]
+name = "ninja"
+version = "1.13.2"
+release = 1
+summary = "Small high-speed build tool"
+description = "Fast build executor commonly used by Meson and CMake backends."
+license = "Apache-2.0"
+homepage = "https://ninja-build.org"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://github.com/ninja-build/ninja/archive/refs/tags/v1.13.2.tar.gz"
+sha256 = "974d6b2f4eeefa25625d34da3cb36bdcebe7fbce40f4c16ac0835fd1c0cbae17"
+filename = "ninja-1.13.2.tar.gz"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = false
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

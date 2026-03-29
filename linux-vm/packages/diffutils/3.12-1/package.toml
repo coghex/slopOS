@@ -1,0 +1,28 @@
+[package]
+name = "diffutils"
+version = "3.12"
+release = 1
+summary = "GNU diff, cmp, and related tools"
+description = "File comparison tools used by patching, tests, and source-build workflows."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/diffutils/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz"
+sha256 = "7c8b7f9fc8609141fdea9cece85249d308624391ff61dedaf528fcb337727dfd"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local"]
+
+[build.env]
+gl_cv_func_strcasecmp_works = "yes"
+gl_cv_func_getopt_gnu = "yes"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

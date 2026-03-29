@@ -1,0 +1,24 @@
+[package]
+name = "libffi"
+version = "3.4.8"
+release = 1
+summary = "Foreign function interface library"
+description = "Portable foreign function interface library used by higher-level runtimes and tooling."
+license = "MIT"
+homepage = "https://github.com/libffi/libffi"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://github.com/libffi/libffi/releases/download/v3.4.8/libffi-3.4.8.tar.gz"
+sha256 = "bc9842a18898bfacb0ed1252c4febcc7e78fa139fd27fdc7a3e30d9d9356119b"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local", "--disable-multi-os-directory", "--disable-exec-static-tramp"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

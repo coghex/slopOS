@@ -1,0 +1,39 @@
+[package]
+name = "less"
+version = "692"
+release = 1
+summary = "Terminal pager"
+description = "Managed pager for interactive day-to-day guest use."
+license = "GPL-3.0+"
+homepage = "https://www.greenwoodsoftware.com/less/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://www.greenwoodsoftware.com/less/less-692.tar.gz"
+sha256 = "61300f603798ecf1d7786570789f0ff3f5a1acf075a6fb9f756837d166e37d14"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local", "--disable-nls"]
+
+[build.env]
+CPPFLAGS = "-I/usr/local/include"
+LDFLAGS = "-L/usr/local/lib"
+PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "ncurses"
+constraint = ">= 6.6-20251231-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "ncurses"
+constraint = ">= 6.6-20251231-1"
+kind = "build"

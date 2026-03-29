@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+dest_dir="/usr/lib64"
+linked=0
+
+cleanup_stale_links() {
+  for existing in "$dest_dir"/*.so "$dest_dir"/*.so.*; do
+    [ -L "$existing" ] || continue
+    target="$(readlink "$existing" || true)"
+    case "$target" in
+      /usr/local/lib/*|/usr/local/lib64/*)
+        rm -f "$existing"
+        ;;
+    esac
+  done
+}
+
+link_lib() {
+  src="$1"
+  dest="$dest_dir/$(basename "$src")"
+
+  rm -f "$dest"
+  ln -s "$src" "$dest"
+  linked=$((linked + 1))
+}
+
+mkdir -p "$dest_dir"
+cleanup_stale_links
+
+for src_dir in /usr/local/lib /usr/local/lib64; do
+  [ -d "$src_dir" ] || continue
+
+  for src in "$src_dir"/*.so "$src_dir"/*.so.*; do
+    [ -e "$src" ] || continue
+    link_lib "$src"
+  done
+done
+
+if [ "$linked" -gt 0 ]; then
+  echo "Exposed $linked /usr/local shared libraries in $dest_dir"
+fi

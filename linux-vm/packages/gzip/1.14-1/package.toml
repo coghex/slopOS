@@ -1,0 +1,28 @@
+[package]
+name = "gzip"
+version = "1.14"
+release = 1
+summary = "GNU gzip compression tools"
+description = "Managed gzip, gunzip, and zcat so common archive workflows no longer depend on the seeded base image copy."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/gzip/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftpmirror.gnu.org/gzip/gzip-1.14.tar.xz"
+sha256 = "01a7b881bd220bfdf615f97b8718f80bdfd3f6add385b993dcf6efd14e8c0ac6"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local"]
+
+[build.env]
+gl_cv_func_fflush_stdin = "yes"
+ac_cv_path_shell = "/bin/sh"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

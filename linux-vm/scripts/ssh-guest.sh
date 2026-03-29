@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_FILE="$ROOT_DIR/configs/host-guest.env"
 IDENTITY_PATH_FILE="$ROOT_DIR/qemu/guest-ssh-identity.path"
-KNOWN_HOSTS_FILE="$ROOT_DIR/qemu/known_hosts"
+KNOWN_HOSTS_FILE="${KNOWN_HOSTS_FILE:-$ROOT_DIR/qemu/known_hosts}"
+OVERRIDE_GUEST_SSH_FORWARD_PORT="${GUEST_SSH_FORWARD_PORT:-}"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "Missing host config: $CONFIG_FILE" >&2
@@ -19,6 +20,10 @@ fi
 
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
+
+if [[ -n "$OVERRIDE_GUEST_SSH_FORWARD_PORT" ]]; then
+  GUEST_SSH_FORWARD_PORT="$OVERRIDE_GUEST_SSH_FORWARD_PORT"
+fi
 read -r IDENTITY_FILE < "$IDENTITY_PATH_FILE"
 
 if [[ ! -f "$IDENTITY_FILE" ]]; then
@@ -27,6 +32,28 @@ if [[ ! -f "$IDENTITY_FILE" ]]; then
 fi
 
 mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")"
+
+if [[ $# -eq 0 ]]; then
+  exec ssh \
+    -i "$IDENTITY_FILE" \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
+    -p "$GUEST_SSH_FORWARD_PORT" \
+    root@127.0.0.1
+fi
+
+if [[ $# -eq 1 ]]; then
+  remote_command="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; $1"
+  exec ssh \
+    -i "$IDENTITY_FILE" \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
+    -p "$GUEST_SSH_FORWARD_PORT" \
+    root@127.0.0.1 \
+    "$remote_command"
+fi
 
 exec ssh \
   -i "$IDENTITY_FILE" \

@@ -1,0 +1,27 @@
+[package]
+name = "hello-lib"
+version = "0.2.0"
+release = 1
+summary = "Offline dependency demo library"
+description = "Second version of the local dependency package used to exercise upgrades."
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "payload"
+sha256 = "local"
+destination = "payload"
+
+[build]
+system = "custom"
+out_of_tree = true
+directory = "payload"
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/share/hello-lib\"",
+  "install -m 0644 \"$PKG_SOURCE_DIR/libhello-v2.txt\" \"$PKG_DESTDIR/usr/local/share/hello-lib/libhello-v2.txt\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

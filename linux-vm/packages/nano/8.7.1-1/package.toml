@@ -1,0 +1,57 @@
+[package]
+name = "nano"
+version = "8.7.1"
+release = 1
+summary = "Small terminal text editor"
+description = "Managed terminal editor built with color, nanorc, and libmagic support for everyday guest use."
+license = "GPL-3.0+"
+homepage = "https://www.nano-editor.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://www.nano-editor.org/dist/v8/nano-8.7.1.tar.xz"
+sha256 = "76f0dcb248f2e2f1251d4ecd20fd30fb400a360a3a37c6c340e0a52c2d1cdedf"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--prefix=/usr/local",
+  "--disable-tiny",
+  "--enable-libmagic",
+  "--enable-color",
+  "--enable-nanorc",
+  "--disable-nls",
+]
+
+[build.env]
+CPPFLAGS = "-I/usr/local/include"
+LDFLAGS = "-L/usr/local/lib"
+PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig"
+ac_cv_prog_NCURSESW_CONFIG = "/usr/local/bin/ncursesw6-config"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "ncurses"
+constraint = ">= 6.6-20251231-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "file"
+constraint = ">= 5.47-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "ncurses"
+constraint = ">= 6.6-20251231-1"
+kind = "build"
+
+[[dependencies]]
+name = "file"
+constraint = ">= 5.47-1"
+kind = "build"

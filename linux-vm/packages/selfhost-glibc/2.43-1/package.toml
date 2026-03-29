@@ -1,0 +1,46 @@
+[package]
+name = "selfhost-glibc"
+version = "2.43"
+release = 1
+summary = "Managed self-host glibc sysroot"
+description = "Builds and stages the rebuilt self-host glibc sysroot under /Volumes/slopos-data/toolchain/selfhost-glibc-stage."
+license = "LGPL-2.1-or-later"
+homepage = "https://www.gnu.org/software/libc/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://sourceware.org/pub/glibc/snapshots/glibc-2.43-10-gc3ceb93dc4f67253037644dc8f194831e27f3160-git4.tar.gz"
+filename = "glibc-2.43-10-gc3ceb93dc4f67253037644dc8f194831e27f3160-git4.tar.gz"
+sha256 = "5e21722755f466d15770574788394a4abb4fb1e02603a707beeb199706a26a46"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/Volumes/slopos-data/toolchain/selfhost-sysroot"
+owned_prefixes = ["/Volumes/slopos-data/toolchain/selfhost-sysroot"]
+
+[[dependencies]]
+name = "selfhost-binutils"
+constraint = ">= 2.45.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-gcc-stage2"
+constraint = ">= 14.3.0-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-binutils"
+constraint = ">= 2.45.1-1"
+kind = "build"

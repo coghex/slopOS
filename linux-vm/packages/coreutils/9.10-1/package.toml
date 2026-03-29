@@ -1,0 +1,79 @@
+[package]
+name = "coreutils"
+version = "9.10"
+release = 1
+summary = "GNU core file and text utilities"
+description = "Managed everyday userland tools such as cp, mv, rm, ls, chmod, sort, tr, head, tail, uname, and many others under /usr/local."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/coreutils/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftpmirror.gnu.org/coreutils/coreutils-9.10.tar.xz"
+sha256 = "16535a9adf0b10037364e2d612aad3d9f4eca3a344949ced74d12faf4bd51d25"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--prefix=/usr/local",
+  "--disable-rpath",
+  "--disable-year2038",
+  "--disable-single-binary",
+  "--disable-acl",
+  "--disable-xattr",
+  "--disable-libcap",
+  "--without-selinux",
+  "--with-openssl=yes",
+  "--enable-install-program=kill,uptime",
+]
+
+[build.env]
+FORCE_UNSAFE_CONFIGURE = "1"
+CPPFLAGS = "-I/usr/local/include"
+LDFLAGS = "-L/usr/local/lib"
+PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig"
+ac_cv_c_restrict = "no"
+ac_cv_func_chown_works = "yes"
+ac_cv_func_fstatat = "yes"
+ac_cv_func_getdelim = "yes"
+ac_cv_func_getgroups = "yes"
+ac_cv_func_getgroups_works = "yes"
+ac_cv_func_getloadavg = "no"
+ac_cv_func_strnlen_working = "yes"
+ac_cv_have_decl_strerror_r = "yes"
+ac_cv_have_decl_strnlen = "yes"
+ac_cv_lib_getloadavg_getloadavg = "no"
+ac_cv_lib_util_getloadavg = "no"
+ac_fsusage_space = "yes"
+ac_use_included_regex = "no"
+am_cv_func_working_getline = "yes"
+fu_cv_sys_stat_statfs2_bsize = "yes"
+gl_cv_func_getcwd_null = "yes"
+gl_cv_func_getcwd_path_max = "yes"
+gl_cv_func_link_follows_symlink = "no"
+gl_cv_func_lstat_dereferences_slashed_symlink = "yes"
+gl_cv_func_re_compile_pattern_working = "yes"
+gl_cv_func_svid_putenv = "yes"
+gl_cv_func_working_mkstemp = "yes"
+gl_cv_func_working_utimes = "yes"
+gl_cv_macro_MB_CUR_MAX_good = "yes"
+gl_cv_have_proc_uptime = "yes"
+utils_cv_localtime_cache = "no"
+MAKEINFO = "true"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "openssl"
+constraint = ">= 3.6.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "openssl"
+constraint = ">= 3.6.1-1"
+kind = "build"

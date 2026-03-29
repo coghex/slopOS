@@ -1,0 +1,10 @@
+[package]
+name = "sloppkg-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+thiserror.workspace = true
+sloppkg-types = { path = "../sloppkg-types" }

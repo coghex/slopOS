@@ -1,0 +1,27 @@
+[package]
+name = "sloppkg"
+version = "0.1.0"
+release = 1
+summary = "Persistent managed guest package manager binary"
+description = "Cross-built guest sloppkg runtime installed on the persistent disk so root resets still expose the managed CLI at boot."
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "payload"
+sha256 = "local"
+destination = "payload"
+
+[build]
+system = "custom"
+out_of_tree = true
+directory = "payload"
+install = [
+  "mkdir -p \"$PKG_DESTDIR/Volumes/slopos-data/opt/sloppkg/current/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/sloppkg\" \"$PKG_DESTDIR/Volumes/slopos-data/opt/sloppkg/current/bin/sloppkg\""
+]
+
+[install]
+prefix = "/Volumes/slopos-data/opt/sloppkg/current"
+owned_prefixes = ["/Volumes/slopos-data/opt/sloppkg"]

@@ -1,0 +1,27 @@
+[package]
+name = "xz"
+version = "5.8.2"
+release = 1
+summary = "XZ compression tools and libraries"
+description = "LZMA/XZ compression libraries and command-line tools."
+license = "Public Domain, BSD-0-Clause, GPL-2.0+, GPL-3.0+, LGPL-2.1+"
+homepage = "https://tukaani.org/xz/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://github.com/tukaani-project/xz/releases/download/v5.8.2/xz-5.8.2.tar.bz2"
+sha256 = "60345d7c0b9c8d7ffa469e96898c300def3669f5047fc76219b819340839f3d8"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local", "--disable-rpath", "--disable-werror", "--enable-threads"]
+
+[build.env]
+ac_cv_prog_cc_c99 = "-std=gnu99"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

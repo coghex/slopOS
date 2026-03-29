@@ -1,0 +1,24 @@
+[package]
+name = "which"
+version = "2.23"
+release = 1
+summary = "GNU which"
+description = "Locate executables on PATH from inside the managed guest environment."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/which/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/which/which-2.23.tar.gz"
+sha256 = "a2c558226fc4d9e4ce331bd2fd3c3f17f955115d2c00e447618a4ef9978a2a73"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

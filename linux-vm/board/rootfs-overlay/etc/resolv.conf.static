@@ -1,0 +1,2 @@
+# Keep the dhclient-script /etc/resolv.conf.* glob non-empty even when
+# no DHCP-generated fragment is present.

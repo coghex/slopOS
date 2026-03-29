@@ -1,0 +1,59 @@
+[package]
+name = "automake"
+version = "1.16.5"
+release = 1
+summary = "GNU Automake"
+description = "Automake and aclocal tools for generating portable Makefile.in files from Automake metadata."
+license = "GPL-2.0+"
+homepage = "https://www.gnu.org/software/automake/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/automake/automake-1.16.5.tar.xz"
+sha256 = "f01d58cd6d9d77fbdca9eb4bbd5ead1988228fdb73d6f7a201f5f8d6b118b469"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[[sources]]
+kind = "file"
+url = "gtk-doc.m4"
+sha256 = "local"
+destination = "support/gtk-doc.m4"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[build.env]
+ac_cv_path_M4 = "/usr/local/bin/m4"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "m4"
+constraint = ">= 1.4.21-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "autoconf"
+constraint = ">= 2.72-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "m4"
+constraint = ">= 1.4.21-1"
+kind = "build"
+
+[[dependencies]]
+name = "autoconf"
+constraint = ">= 2.72-1"
+kind = "build"

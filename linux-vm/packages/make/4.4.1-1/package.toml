@@ -1,0 +1,24 @@
+[package]
+name = "make"
+version = "4.4.1"
+release = 1
+summary = "GNU Make build automation tool"
+description = "Managed GNU Make so Autotools and classic build flows no longer depend on the seeded base image copy."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/make/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftpmirror.gnu.org/make/make-4.4.1.tar.gz"
+sha256 = "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local", "--without-guile"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

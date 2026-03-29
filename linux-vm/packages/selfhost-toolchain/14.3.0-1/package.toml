@@ -1,0 +1,84 @@
+[package]
+name = "selfhost-toolchain"
+version = "14.3.0"
+release = 1
+summary = "Managed self-host toolchain world package"
+description = "Meta package that pulls in the managed self-hosted toolchain stack built by sloppkg."
+license = "MIT"
+architectures = ["aarch64"]
+
+[build]
+system = "custom"
+out_of_tree = true
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[bootstrap]
+sysroot = "/Volumes/slopos-data/toolchain/selfhost-sysroot"
+
+[[bootstrap.stages]]
+name = "stage1-libs"
+packages = ["selfhost-gmp", "selfhost-mpfr", "selfhost-mpc"]
+env = { SELFHOST_SDK_ROOT = "/Volumes/slopos-data/toolchain/current", SELFHOST_BOOTSTRAP_SYSROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot", SELFHOST_STAGE1_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage1", SELFHOST_STAGE2_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage2", SELFHOST_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/glibc", SELFHOST_NATIVE_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/glibc-stage", SELFHOST_FINAL_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/final", SELFHOST_DISTFILES_ROOT = "/Volumes/slopos-data/pkg/distfiles" }
+
+[[bootstrap.stages]]
+name = "stage2-binutils"
+packages = ["selfhost-binutils"]
+depends_on = ["stage1-libs"]
+env = { SELFHOST_SDK_ROOT = "/Volumes/slopos-data/toolchain/current", SELFHOST_BOOTSTRAP_SYSROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot", SELFHOST_STAGE1_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage1", SELFHOST_STAGE2_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage2", SELFHOST_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/glibc", SELFHOST_NATIVE_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/glibc-stage", SELFHOST_FINAL_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/final", SELFHOST_DISTFILES_ROOT = "/Volumes/slopos-data/pkg/distfiles" }
+
+[[bootstrap.stages]]
+name = "stage3-gcc-stage2"
+packages = ["selfhost-gcc-stage2"]
+depends_on = ["stage2-binutils"]
+env = { SELFHOST_SDK_ROOT = "/Volumes/slopos-data/toolchain/current", SELFHOST_BOOTSTRAP_SYSROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot", SELFHOST_STAGE1_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage1", SELFHOST_STAGE2_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage2", SELFHOST_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/glibc", SELFHOST_NATIVE_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/glibc-stage", SELFHOST_FINAL_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/final", SELFHOST_DISTFILES_ROOT = "/Volumes/slopos-data/pkg/distfiles" }
+
+[[bootstrap.stages]]
+name = "stage4-glibc"
+packages = ["selfhost-glibc"]
+depends_on = ["stage3-gcc-stage2"]
+env = { SELFHOST_SDK_ROOT = "/Volumes/slopos-data/toolchain/current", SELFHOST_BOOTSTRAP_SYSROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot", SELFHOST_STAGE1_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage1", SELFHOST_STAGE2_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage2", SELFHOST_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/glibc", SELFHOST_NATIVE_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/glibc-stage", SELFHOST_FINAL_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/final", SELFHOST_DISTFILES_ROOT = "/Volumes/slopos-data/pkg/distfiles" }
+
+[[bootstrap.stages]]
+name = "stage5-final-gcc"
+packages = ["selfhost-gcc"]
+depends_on = ["stage4-glibc"]
+env = { SELFHOST_SDK_ROOT = "/Volumes/slopos-data/toolchain/current", SELFHOST_BOOTSTRAP_SYSROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot", SELFHOST_STAGE1_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage1", SELFHOST_STAGE2_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage2", SELFHOST_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/glibc", SELFHOST_NATIVE_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/glibc-stage", SELFHOST_FINAL_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/final", SELFHOST_DISTFILES_ROOT = "/Volumes/slopos-data/pkg/distfiles" }
+
+[[bootstrap.stages]]
+name = "stage6-world"
+packages = ["selfhost-toolchain"]
+depends_on = ["stage5-final-gcc"]
+env = { SELFHOST_SDK_ROOT = "/Volumes/slopos-data/toolchain/current", SELFHOST_BOOTSTRAP_SYSROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot", SELFHOST_STAGE1_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage1", SELFHOST_STAGE2_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/stage2", SELFHOST_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/glibc", SELFHOST_NATIVE_GLIBC_STAGE_ROOT = "/Volumes/slopos-data/toolchain/glibc-stage", SELFHOST_FINAL_ROOT = "/Volumes/slopos-data/toolchain/selfhost-sysroot/final", SELFHOST_DISTFILES_ROOT = "/Volumes/slopos-data/pkg/distfiles" }
+
+[[dependencies]]
+name = "selfhost-gmp"
+constraint = ">= 6.3.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-mpfr"
+constraint = ">= 4.1.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-mpc"
+constraint = ">= 1.3.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-binutils"
+constraint = ">= 2.45.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-glibc"
+constraint = ">= 2.43-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-gcc"
+constraint = ">= 14.3.0-1"
+kind = "runtime"

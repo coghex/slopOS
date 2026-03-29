@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+STATE_ROOT="${STATE_ROOT:-/Volumes/slopos-data/pkg}"
+GUEST_SLOPPKG_BIN="${GUEST_SLOPPKG_BIN:-/usr/local/bin/sloppkg}"
+SLOPOS_PUBLISH_HTTP_REPO="${SLOPOS_PUBLISH_HTTP_REPO:-/usr/sbin/slopos-publish-http-repo}"
+WORLD_TARGET="${WORLD_TARGET:-}"
+PUBLISH_ONLY=0
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: slopos-sync-world [--install-target <package>] [--publish-only]
+
+  --install-target <package>  Install a named target instead of upgrading the current world set.
+  --publish-only              Refresh the guest unified repo and snapshot, but do not run install/upgrade.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --install-target)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      WORLD_TARGET="$2"
+      shift 2
+      ;;
+    --publish-only)
+      PUBLISH_ONLY=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ ! -x "$SLOPOS_PUBLISH_HTTP_REPO" ]; then
+  echo "Missing publish helper: $SLOPOS_PUBLISH_HTTP_REPO" >&2
+  exit 1
+fi
+
+if [ ! -x "$GUEST_SLOPPKG_BIN" ]; then
+  echo "Missing guest sloppkg binary: $GUEST_SLOPPKG_BIN" >&2
+  exit 1
+fi
+
+"$SLOPOS_PUBLISH_HTTP_REPO"
+
+if [ "$PUBLISH_ONLY" = "1" ]; then
+  exit 0
+fi
+
+if [ -n "$WORLD_TARGET" ]; then
+  exec "$GUEST_SLOPPKG_BIN" --state-root "$STATE_ROOT" install "$WORLD_TARGET" --root /
+fi
+
+exec "$GUEST_SLOPPKG_BIN" --state-root "$STATE_ROOT" upgrade --root /

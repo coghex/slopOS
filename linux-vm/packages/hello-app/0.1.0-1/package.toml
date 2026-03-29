@@ -1,0 +1,32 @@
+[package]
+name = "hello-app"
+version = "0.1.0"
+release = 1
+summary = "Offline dependency demo application"
+description = "Small local application package used to exercise dependency-aware transactions."
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "payload"
+sha256 = "local"
+destination = "payload"
+
+[build]
+system = "custom"
+out_of_tree = true
+directory = "payload"
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/hello-app.sh\" \"$PKG_DESTDIR/usr/local/bin/hello-app\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "hello-lib"
+constraint = ">= 0.1.0-1, < 0.2.0-0"
+kind = "runtime"

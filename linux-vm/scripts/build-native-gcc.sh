@@ -159,13 +159,13 @@ fi
 make -j"\$build_jobs" all-gcc all-target-libgcc
 make install-gcc install-target-libgcc
 
-versioned_gcc="\$(find "\$toolchain_root/bin" -maxdepth 1 -type f -name 'aarch64-linux-gnu-gcc-*' | sort | head -n 1)"
+versioned_gcc="\$(find "\$toolchain_root/bin" -maxdepth 1 -type f -name 'aarch64-linux-gnu-gcc-[0-9]*' | sort | head -n 1)"
 if [[ -n "\$versioned_gcc" ]]; then
   rm -f "\$toolchain_root/bin/aarch64-linux-gnu-gcc"
   cat >"\$toolchain_root/bin/aarch64-linux-gnu-gcc" <<GCCWRAP
 #!/bin/sh
 export LD_LIBRARY_PATH="\$sdk_runtime_libs\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "\$versioned_gcc" "\$@"
+exec "\$versioned_gcc" "\\\$@"
 GCCWRAP
   chmod 0755 "\$toolchain_root/bin/aarch64-linux-gnu-gcc"
 fi

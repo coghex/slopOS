@@ -1,0 +1,24 @@
+[package]
+name = "patch"
+version = "2.7.6"
+release = 1
+summary = "GNU patch"
+description = "Apply unified and context diffs from inside the managed guest toolchain."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/patch/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/patch/patch-2.7.6.tar.xz"
+sha256 = "ac610bda97abe0d9f6b7c963255a11dcb196c25e337c61f94e4778d632f1d8fd"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local", "--disable-xattr"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

@@ -1,0 +1,35 @@
+[package]
+name = "libuv"
+version = "1.52.1"
+release = 2
+summary = "Asynchronous I/O support library"
+description = "Cross-platform asynchronous I/O support library needed by the managed DNS tooling slice."
+license = "BSD-2-Clause, BSD-3-Clause, ISC, MIT"
+homepage = "https://libuv.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1-dist.tar.gz"
+sha256 = "c5f14915e2fa7b83b6111c3bc477920559499e10d95f852707420c8725b82d6a"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "pkgconf"
+constraint = ">= 2.3.0-1"
+kind = "build"

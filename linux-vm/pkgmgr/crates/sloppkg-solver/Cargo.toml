@@ -1,0 +1,9 @@
+[package]
+name = "sloppkg-solver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+sloppkg-types = { path = "../sloppkg-types" }

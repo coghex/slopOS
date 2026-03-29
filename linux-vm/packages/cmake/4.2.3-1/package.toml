@@ -1,0 +1,31 @@
+[package]
+name = "cmake"
+version = "4.2.3"
+release = 1
+summary = "Cross-platform project build generator"
+description = "Modern build generator that can drive Ninja or Makefile backends."
+license = "BSD-3-Clause"
+homepage = "https://cmake.org"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://cmake.org/files/v4.2/cmake-4.2.3.tar.gz"
+sha256 = "7efaccde8c5a6b2968bad6ce0fe60e19b6e10701a12fce948c2bf79bac8a11e9"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = false
+build = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+install = ["make DESTDIR=\"$PKG_DESTDIR\" install/fast"]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

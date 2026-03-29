@@ -1,0 +1,29 @@
+[package]
+name = "findutils"
+version = "4.10.0"
+release = 1
+summary = "GNU find, xargs, and related tools"
+description = "File tree search and command batching tools used by package builds and maintenance scripts."
+license = "GPL-3.0+"
+homepage = "https://www.gnu.org/software/findutils/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/findutils/findutils-4.10.0.tar.xz"
+sha256 = "1387e0b67ff247d2abde998f90dfbf70c1491391a59ddfecb8ae698789f0a4f5"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local", "--disable-year2038", "--without-selinux"]
+
+[build.env]
+gl_cv_func_stdin = "yes"
+ac_cv_func_working_mktime = "yes"
+gl_cv_func_wcwidth_works = "yes"
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

@@ -1,0 +1,46 @@
+[package]
+name = "selfhost-binutils"
+version = "2.45.1"
+release = 1
+summary = "Managed self-host binutils"
+description = "Builds and stages the self-host assembler, linker, and related binutils into /Volumes/slopos-data/toolchain/selfhost-stage1 and exposes stable prefixed entrypoints under /usr/bin and /usr/local/bin."
+license = "GPL-3.0-or-later"
+homepage = "https://www.gnu.org/software/binutils/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/binutils/binutils-2.45.1.tar.xz"
+filename = "binutils-2.45.1.tar.xz"
+sha256 = "5fe101e6fe9d18fdec95962d81ed670fdee5f37e3f48f0bef87bddf862513aa5"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/Volumes/slopos-data/toolchain/selfhost-sysroot"
+owned_prefixes = ["/Volumes/slopos-data/toolchain/selfhost-sysroot", "/usr/bin", "/usr/local/bin"]
+
+[[dependencies]]
+name = "selfhost-gmp"
+constraint = ">= 6.3.0-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-mpfr"
+constraint = ">= 4.1.1-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-mpc"
+constraint = ">= 1.3.1-1"
+kind = "build"

@@ -1,0 +1,17 @@
+[package]
+name = "sloppkg-repo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+zstd.workspace = true
+sloppkg-types = { path = "../sloppkg-types" }

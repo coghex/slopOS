@@ -1,0 +1,45 @@
+[package]
+name = "tcpdump"
+version = "4.99.5"
+release = 1
+summary = "Packet capture inspection tool"
+description = "Managed tcpdump build so the guest can inspect live traffic without falling back to the base image."
+license = "BSD-3-Clause"
+homepage = "https://www.tcpdump.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://www.tcpdump.org/release/tcpdump-4.99.5.tar.gz"
+sha256 = "8c75856e00addeeadf70dad67c9ff3dd368536b2b8563abf6854d7c764cd3adb"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "libpcap"
+constraint = ">= 1.10.5-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "libpcap"
+constraint = ">= 1.10.5-1"
+kind = "build"
+
+[[dependencies]]
+name = "pkgconf"
+constraint = ">= 2.3.0-1"
+kind = "build"

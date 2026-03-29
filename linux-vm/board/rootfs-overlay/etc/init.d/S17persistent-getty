@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+managed_agetty_bin="/usr/local/sbin/agetty"
+login_bin="/bin/login"
+seed_agetty_path="/sbin/agetty"
+legacy_getty_path="/sbin/getty"
+active_agetty_bin="$seed_agetty_path"
+
+if [ -x "$managed_agetty_bin" ]; then
+  active_agetty_bin="$managed_agetty_bin"
+fi
+
+if [ ! -x "$active_agetty_bin" ]; then
+  exit 0
+fi
+
+if [ ! -x "$login_bin" ]; then
+  echo "Getty provider $active_agetty_bin is available but required login program $login_bin is missing" >&2
+  exit 0
+fi
+
+if [ "$active_agetty_bin" = "$managed_agetty_bin" ]; then
+  rm -f "$seed_agetty_path"
+  ln -s "$managed_agetty_bin" "$seed_agetty_path"
+fi
+
+rm -f "$legacy_getty_path"
+ln -s "$seed_agetty_path" "$legacy_getty_path"
+
+echo "Exposed getty provider from $active_agetty_bin"

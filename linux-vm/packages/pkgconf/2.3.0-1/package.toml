@@ -1,0 +1,28 @@
+[package]
+name = "pkgconf"
+version = "2.3.0"
+release = 1
+summary = "pkg-config compatible metadata tool"
+description = "Lightweight pkg-config implementation for querying compile and link metadata."
+license = "pkgconf license"
+homepage = "https://github.com/pkgconf/pkgconf"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://distfiles.ariadne.space/pkgconf/pkgconf-2.3.0.tar.xz"
+sha256 = "3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = ["--prefix=/usr/local"]
+install = [
+  "make DESTDIR=\"$PKG_DESTDIR\" install",
+  "ln -sf pkgconf \"$PKG_DESTDIR/usr/local/bin/pkg-config\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]

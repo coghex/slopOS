@@ -1,0 +1,51 @@
+[package]
+name = "selfhost-mpc"
+version = "1.3.1"
+release = 1
+summary = "Managed self-host MPC"
+description = "Builds and stages MPC into the managed self-host toolchain prefix under /Volumes/slopos-data/toolchain/selfhost-stage1."
+license = "LGPL-3.0-or-later"
+homepage = "https://www.multiprecision.org/mpc/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz"
+filename = "mpc-1.3.1.tar.gz"
+sha256 = "0fea081e21fa7a0396650153e8921cb5aa6c9ad520af335b6e1e15a72e57e385"
+strip_components = 1
+
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
+
+[install]
+prefix = "/Volumes/slopos-data/toolchain/selfhost-sysroot"
+owned_prefixes = ["/Volumes/slopos-data/toolchain/selfhost-sysroot"]
+
+[[dependencies]]
+name = "selfhost-gmp"
+constraint = ">= 6.3.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-mpfr"
+constraint = ">= 4.1.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "selfhost-gmp"
+constraint = ">= 6.3.0-1"
+kind = "build"
+
+[[dependencies]]
+name = "selfhost-mpfr"
+constraint = ">= 4.1.1-1"
+kind = "build"

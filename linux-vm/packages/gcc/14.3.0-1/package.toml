@@ -1,0 +1,74 @@
+[package]
+name = "gcc"
+version = "14.3.0"
+release = 1
+summary = "GNU Compiler Collection"
+description = "Native C and C++ compiler used to transition the guest toward a self-hosted toolchain."
+license = "GPL-3.0-or-later"
+homepage = "https://gcc.gnu.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/gcc/gcc-14.3.0/gcc-14.3.0.tar.xz"
+filename = "gcc-14.3.0.tar.xz"
+sha256 = "0941d71cf8aec766b52a0a733719764dd0c7b17039f15a2dfa56d5b2012c017d"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--enable-languages=c,c++",
+  "--disable-bootstrap",
+  "--disable-multilib",
+  "--disable-nls",
+  "--disable-libsanitizer",
+  "--with-gmp=/usr/local",
+  "--with-mpfr=/usr/local",
+  "--with-mpc=/usr/local",
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+
+[[dependencies]]
+name = "binutils"
+constraint = ">= 2.45-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "gmp"
+constraint = ">= 6.3.0-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "mpfr"
+constraint = ">= 4.2.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "mpc"
+constraint = ">= 1.3.1-1"
+kind = "runtime"
+
+[[dependencies]]
+name = "binutils"
+constraint = ">= 2.45-1"
+kind = "build"
+
+[[dependencies]]
+name = "gmp"
+constraint = ">= 6.3.0-1"
+kind = "build"
+
+[[dependencies]]
+name = "mpfr"
+constraint = ">= 4.2.1-1"
+kind = "build"
+
+[[dependencies]]
+name = "mpc"
+constraint = ">= 1.3.1-1"
+kind = "build"

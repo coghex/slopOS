@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+hotplug_path="/proc/sys/kernel/hotplug"
+
+if [ -w "$hotplug_path" ]; then
+  printf '\n' >"$hotplug_path"
+fi
+
+rm -f /etc/mdev.conf
+
+if [ -L /sbin/mdev ] && [ "$(readlink -f /sbin/mdev)" = "/bin/busybox" ]; then
+  rm -f /sbin/mdev
+fi
+
+echo "Enforced devtmpfs-only device management"

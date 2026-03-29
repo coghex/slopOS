@@ -1,0 +1,27 @@
+[package]
+name = "gmp"
+version = "6.3.0"
+release = 1
+summary = "GNU multiple precision arithmetic library"
+description = "Arbitrary precision arithmetic library used by GCC and related toolchain packages."
+license = "LGPL-3.0-or-later"
+homepage = "https://gmplib.org/"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "archive"
+url = "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
+filename = "gmp-6.3.0.tar.xz"
+sha256 = "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+strip_components = 1
+
+[build]
+system = "gnu"
+out_of_tree = true
+configure = [
+  "--enable-cxx",
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
