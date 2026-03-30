@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_FILE="$ROOT_DIR/configs/host-guest.env"
 NORMAL_OUTPUT_DIR="$ROOT_DIR/artifacts/buildroot-output"
 RECOVERY_OUTPUT_DIR="$ROOT_DIR/artifacts/buildroot-recovery-output"
-NORMAL_ROOTFS_IMAGE="$NORMAL_OUTPUT_DIR/images/rootfs.ext4"
+NORMAL_ROOTFS_IMAGE="${NORMAL_ROOTFS_IMAGE:-$NORMAL_OUTPUT_DIR/images/rootfs.ext4}"
 RECOVERY_INITRAMFS_GZ="$RECOVERY_OUTPUT_DIR/images/rootfs.cpio.gz"
 RECOVERY_INITRAMFS_RAW="$RECOVERY_OUTPUT_DIR/images/rootfs.cpio"
 INSTANCE="${LIMA_INSTANCE:-slopos-builder}"
@@ -19,7 +19,9 @@ usage() {
 Usage: ./scripts/validate-busyboxless.sh [--artifacts-only] [--live-only]
 
 Validates that the current normal seed image and recovery initramfs are
-BusyBox-free according to the repository contract.
+BusyBox-free according to the repository contract, and that the declared
+normal seed ownership boundary still matches the checked-in seed tree,
+artifact surface, and isolated boot behavior.
 EOF
 }
 
@@ -72,12 +74,6 @@ if [[ ! -f "$RECOVERY_INITRAMFS_GZ" && ! -f "$RECOVERY_INITRAMFS_RAW" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$ROOT_DIR/qemu/guest-ssh-identity.path" ]]; then
-  echo "Missing guest SSH identity path file: $ROOT_DIR/qemu/guest-ssh-identity.path" >&2
-  echo "Run ./scripts/prepare-guest-ssh.sh and rebuild the normal image first." >&2
-  exit 1
-fi
-
 cleanup() {
   if [[ -n "$NORMAL_VM_PID" ]] && kill -0 "$NORMAL_VM_PID" 2>/dev/null; then
     kill "$NORMAL_VM_PID" 2>/dev/null || true
@@ -91,6 +87,79 @@ cleanup() {
 
 trap cleanup EXIT
 
+run_normal_seed_definition_check() {
+  python3 - "$ROOT_DIR" <<'PY'
+import os
+import sys
+import tomllib
+
+root = sys.argv[1]
+manifest_path = os.path.join(root, "rootfs", "bootstrap-manifest.toml")
+
+with open(manifest_path, "rb") as fh:
+    manifest = tomllib.load(fh)
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+normal_seed = manifest["normal_seed_tree"]
+seed_tree = os.path.join(root, normal_seed["source"])
+assembly_hook = os.path.join(root, normal_seed["assembly_hook"])
+overlay_dir = os.path.join(root, normal_seed["mutable_input"])
+repo_owned_paths = sorted(normal_seed["repo_owned_paths"])
+mutable_overlay_paths = set(normal_seed["mutable_overlay_paths"])
+
+if not os.path.isdir(seed_tree):
+    fail(f"missing normal seed tree directory: {seed_tree}")
+
+if not os.path.isfile(assembly_hook):
+    fail(f"missing normal seed assembly hook: {assembly_hook}")
+
+actual_repo_owned_paths = []
+for dirpath, dirnames, filenames in os.walk(seed_tree):
+    dirnames.sort()
+    filenames.sort()
+    for filename in filenames:
+        full_path = os.path.join(dirpath, filename)
+        rel_path = os.path.relpath(full_path, seed_tree).replace(os.sep, "/")
+        actual_repo_owned_paths.append("/" + rel_path)
+
+actual_repo_owned_paths.sort()
+if actual_repo_owned_paths != repo_owned_paths:
+    missing = sorted(set(repo_owned_paths) - set(actual_repo_owned_paths))
+    extra = sorted(set(actual_repo_owned_paths) - set(repo_owned_paths))
+    details = []
+    if missing:
+        details.append("missing from tree: " + ", ".join(missing))
+    if extra:
+        details.append("missing from manifest: " + ", ".join(extra))
+    fail("normal seed repo_owned_paths drift detected (" + "; ".join(details) + ")")
+
+actual_overlay_files = []
+if os.path.isdir(overlay_dir):
+    for dirpath, dirnames, filenames in os.walk(overlay_dir):
+        dirnames.sort()
+        filenames.sort()
+        for filename in filenames:
+            full_path = os.path.join(dirpath, filename)
+            rel_path = os.path.relpath(full_path, overlay_dir).replace(os.sep, "/")
+            actual_overlay_files.append("/" + rel_path)
+
+unexpected_overlay = sorted(set(actual_overlay_files) - mutable_overlay_paths)
+if unexpected_overlay:
+    fail(
+        "mutable overlay contains unexpected files: "
+        + ", ".join(unexpected_overlay)
+    )
+
+if set(repo_owned_paths) & mutable_overlay_paths:
+    fail("normal seed repo_owned_paths overlap mutable_overlay_paths")
+
+print("normal seed tree/manifest validation passed")
+PY
+}
+
 run_normal_artifact_check() {
   local image_path="$NORMAL_ROOTFS_IMAGE"
   local shell_cmd
@@ -98,15 +167,23 @@ run_normal_artifact_check() {
   read -r -d '' shell_cmd <<EOF || true
 set -euo pipefail
 image=$(printf '%q' "$image_path")
+repo_root=$(printf '%q' "$ROOT_DIR")
 tmp=\$(mktemp -d)
 trap 'rm -rf "\$tmp"' EXIT
 mkdir -p "\$tmp/rootfs"
 debugfs -R "rdump / \$tmp/rootfs" "\$image" >/dev/null 2>&1
-python3 - "\$tmp/rootfs" <<'PY'
+python3 - "\$tmp/rootfs" "\$repo_root" <<'PY'
 import os
 import sys
+import tomllib
 
 root = sys.argv[1]
+repo_root = sys.argv[2]
+
+with open(os.path.join(repo_root, "rootfs", "bootstrap-manifest.toml"), "rb") as fh:
+    manifest = tomllib.load(fh)
+
+repo_owned_paths = manifest["normal_seed_tree"]["repo_owned_paths"]
 
 def fail(message: str) -> None:
     print(message, file=sys.stderr)
@@ -122,6 +199,57 @@ for unexpected in ("bin/busybox", "linuxrc", "bin/ash"):
 for required in ("bin/sh", "sbin/getty", "usr/sbin/seedrng"):
     if not os.path.lexists(path(*required.split("/"))):
         fail(f"normal artifact is missing required path {required}")
+
+for required in repo_owned_paths:
+    if not os.path.lexists(path(*required.lstrip("/").split("/"))):
+        fail(f"normal artifact is missing repo-owned seed path {required}")
+
+compatibility_links = {
+    "/bin/sh": "dash",
+    "/sbin/getty": "/sbin/agetty",
+    "/sbin/ifup": "/usr/sbin/ifup",
+    "/sbin/ifdown": "/usr/sbin/ifdown",
+}
+
+for link_path, expected_target in compatibility_links.items():
+    full_link = path(*link_path.lstrip("/").split("/"))
+    if not os.path.lexists(full_link):
+        fail(f"normal artifact is missing compatibility path {link_path}")
+    if not os.path.islink(full_link):
+        fail(f"normal artifact compatibility path is not a symlink: {link_path}")
+    link_target = os.readlink(full_link)
+    if link_target != expected_target:
+        fail(
+            f"normal artifact {link_path} points to {link_target}, "
+            f"expected {expected_target}"
+        )
+
+for helper_path in repo_owned_paths:
+    if not helper_path.startswith("/usr/sbin/slopos-"):
+        continue
+    full_executable = path(*helper_path.lstrip("/").split("/"))
+    if not os.access(full_executable, os.X_OK):
+        fail(f"normal artifact helper is not executable: {helper_path}")
+
+usr_local = path("usr", "local")
+managed_leaks = []
+if os.path.lexists(usr_local):
+    for dirpath, dirnames, filenames in os.walk(usr_local):
+        dirnames.sort()
+        filenames.sort()
+        rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        for dirname in list(dirnames):
+            full_dir = os.path.join(dirpath, dirname)
+            if os.path.islink(full_dir):
+                managed_leaks.append(f"{rel_dir}/{dirname}")
+        for filename in filenames:
+            managed_leaks.append(f"{rel_dir}/{filename}")
+
+if managed_leaks:
+    fail(
+        "normal artifact unexpectedly ships managed /usr/local content: "
+        + ", ".join(sorted(managed_leaks))
+    )
 
 busybox_links = []
 for rel_dir in ("bin", "sbin", "usr/bin", "usr/sbin"):
@@ -139,7 +267,7 @@ for rel_dir in ("bin", "sbin", "usr/bin", "usr/sbin"):
 if busybox_links:
     fail("normal artifact contains BusyBox symlinks: " + ", ".join(sorted(busybox_links)))
 
-print("normal artifact busyboxless validation passed")
+print("normal artifact seed/ownership validation passed")
 PY
 EOF
 
@@ -303,6 +431,24 @@ run_normal_live_check() {
   local known_hosts_file
   local qemu_log
   local remote_check
+  local repo_owned_paths_literal
+
+  if [[ ! -f "$ROOT_DIR/qemu/guest-ssh-identity.path" ]]; then
+    echo "Missing guest SSH identity path file: $ROOT_DIR/qemu/guest-ssh-identity.path" >&2
+    echo "Run ./scripts/prepare-guest-ssh.sh and rebuild the normal image first." >&2
+    exit 1
+  fi
+
+  repo_owned_paths_literal="$(python3 - "$ROOT_DIR/rootfs/bootstrap-manifest.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as fh:
+    manifest = tomllib.load(fh)
+
+print(repr(manifest["normal_seed_tree"]["repo_owned_paths"]))
+PY
+)"
 
   mkdir -p "$ROOT_DIR/qemu"
   NORMAL_TMPDIR="$(mktemp -d "$ROOT_DIR/qemu/validate-busyboxless.XXXXXX")"
@@ -327,9 +473,12 @@ run_normal_live_check() {
     exit 1
   fi
 
-  read -r -d '' remote_check <<'EOF' || true
+  read -r -d '' remote_check <<EOF || true
 python3 - <<'PY'
 import os
+import stat
+
+repo_owned_paths = $repo_owned_paths_literal
 
 for unexpected in ("/bin/busybox", "/linuxrc", "/bin/ash"):
     if os.path.lexists(unexpected):
@@ -338,6 +487,61 @@ for unexpected in ("/bin/busybox", "/linuxrc", "/bin/ash"):
 for required in ("/bin/sh", "/sbin/getty", "/usr/sbin/seedrng"):
     if not os.path.lexists(required):
         raise SystemExit(f"missing live path: {required}")
+
+for required in repo_owned_paths:
+    if not os.path.lexists(required):
+        raise SystemExit(f"missing live repo-owned seed path: {required}")
+
+for helper_path in repo_owned_paths:
+    if not helper_path.startswith("/usr/sbin/slopos-"):
+        continue
+    if not os.access(helper_path, os.X_OK):
+        raise SystemExit(f"live helper is not executable: {helper_path}")
+
+compatibility_links = {
+    "/bin/sh": "/bin/dash",
+    "/sbin/getty": "/sbin/agetty",
+    "/sbin/ifup": "/usr/sbin/ifup",
+    "/sbin/ifdown": "/usr/sbin/ifdown",
+}
+
+for link_path, expected_target in compatibility_links.items():
+    if not os.path.islink(link_path):
+        raise SystemExit(f"live compatibility path is not a symlink: {link_path}")
+    link_target = os.readlink(link_path)
+    if link_target != expected_target:
+        raise SystemExit(
+            f"unexpected live compatibility target for {link_path}: {link_target} (expected {expected_target})"
+        )
+
+mounted = False
+with open("/proc/mounts", "r", encoding="utf-8") as fh:
+    for line in fh:
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] == "/Volumes/slopos-data":
+            mounted = True
+            break
+
+if not mounted:
+    raise SystemExit("persistent data mount is missing at /Volumes/slopos-data")
+
+managed_leaks = []
+if os.path.lexists("/usr/local"):
+    for dirpath, dirnames, filenames in os.walk("/usr/local"):
+        dirnames.sort()
+        filenames.sort()
+        for dirname in list(dirnames):
+            full_dir = os.path.join(dirpath, dirname)
+            if os.path.islink(full_dir):
+                managed_leaks.append(full_dir)
+        for filename in filenames:
+            managed_leaks.append(os.path.join(dirpath, filename))
+
+if managed_leaks:
+    raise SystemExit(
+        "unexpected managed /usr/local content in isolated boot: "
+        + ", ".join(sorted(managed_leaks))
+    )
 
 bad = []
 for directory in ("/bin", "/sbin", "/usr/bin", "/usr/sbin"):
@@ -352,7 +556,7 @@ for directory in ("/bin", "/sbin", "/usr/bin", "/usr/sbin"):
 if bad:
     raise SystemExit("unexpected live BusyBox symlinks: " + ", ".join(sorted(bad)))
 
-print("normal live busyboxless validation passed")
+print("normal live seed/ownership validation passed")
 PY
 EOF
 
@@ -450,6 +654,9 @@ print("recovery live busyboxless validation passed")
 PY
 }
 
+echo "==> Validating normal seed tree and manifest contract"
+run_normal_seed_definition_check
+
 if [[ "$run_artifact_checks" -eq 1 ]]; then
   echo "==> Validating normal image artifacts"
   run_normal_artifact_check
@@ -464,4 +671,4 @@ if [[ "$run_live_checks" -eq 1 ]]; then
   run_recovery_live_check
 fi
 
-echo "BusyBox-less validation passed."
+echo "BusyBox-less and seed ownership validation passed."

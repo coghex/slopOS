@@ -8,7 +8,7 @@ KNOWN_HOSTS_FILE="${KNOWN_HOSTS_FILE:-$ROOT_DIR/qemu/known_hosts}"
 OVERRIDE_GUEST_SSH_FORWARD_PORT="${GUEST_SSH_FORWARD_PORT:-}"
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "Usage: $0 <local-path> [guest-path]" >&2
+  echo "Usage: $0 <guest-path> [local-path]" >&2
   exit 1
 fi
 
@@ -36,32 +36,10 @@ if [[ ! -f "$IDENTITY_FILE" ]]; then
 fi
 
 SOURCE_PATH="$1"
-TARGET_PATH="${2:-$PERSISTENT_MOUNTPOINT/}"
-recursive_flag=""
-
-if [[ ! -e "$SOURCE_PATH" ]]; then
-  echo "Source path does not exist: $SOURCE_PATH" >&2
-  exit 1
-fi
-
-if [[ -d "$SOURCE_PATH" ]]; then
-  recursive_flag="-r"
-fi
+TARGET_PATH="${2:-.}"
 
 mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")"
-
-if [[ -n "$recursive_flag" ]]; then
-  exec scp \
-    -O \
-    -r \
-    -i "$IDENTITY_FILE" \
-    -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
-    -P "$GUEST_SSH_FORWARD_PORT" \
-    "$SOURCE_PATH" \
-    "root@127.0.0.1:$TARGET_PATH"
-fi
+mkdir -p "$(dirname "$TARGET_PATH")"
 
 exec scp \
   -O \
@@ -70,5 +48,5 @@ exec scp \
   -o StrictHostKeyChecking=accept-new \
   -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
   -P "$GUEST_SSH_FORWARD_PORT" \
-  "$SOURCE_PATH" \
-  "root@127.0.0.1:$TARGET_PATH"
+  "root@127.0.0.1:$SOURCE_PATH" \
+  "$TARGET_PATH"

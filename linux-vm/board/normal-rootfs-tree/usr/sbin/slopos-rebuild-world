@@ -1,0 +1,675 @@
+#!/bin/sh
+set -eu
+
+STATE_ROOT="${STATE_ROOT:-/Volumes/slopos-data/pkg}"
+GUEST_RECIPE_ROOT="${GUEST_RECIPE_ROOT:-/Volumes/slopos-data/packages}"
+GUEST_SLOPPKG_BIN="${GUEST_SLOPPKG_BIN:-/usr/local/bin/sloppkg}"
+SLOPOS_VALIDATE_REBUILD_READINESS="${SLOPOS_VALIDATE_REBUILD_READINESS:-/usr/sbin/slopos-validate-rebuild-readiness}"
+SLOPOS_VALIDATE_MANAGED_WORLD="${SLOPOS_VALIDATE_MANAGED_WORLD:-/usr/sbin/slopos-validate-managed-world}"
+SLOPOS_PUBLISH_HTTP_REPO="${SLOPOS_PUBLISH_HTTP_REPO:-/usr/sbin/slopos-publish-http-repo}"
+SLOPOS_SYNC_WORLD="${SLOPOS_SYNC_WORLD:-/usr/sbin/slopos-sync-world}"
+STABLE_REPO_NAME="${STABLE_REPO_NAME:-workspace}"
+STABLE_CHANNEL="${STABLE_CHANNEL:-stable}"
+STABLE_REVISION="${STABLE_REVISION:-}"
+CANDIDATE_REPO_NAME="${CANDIDATE_REPO_NAME:-${STABLE_REPO_NAME}-candidate}"
+CANDIDATE_CHANNEL="${CANDIDATE_CHANNEL:-candidate}"
+CANDIDATE_REVISION="${CANDIDATE_REVISION:-}"
+WORKFLOW_LOG_DIR="${WORKFLOW_LOG_DIR:-$STATE_ROOT/logs/rebuilds}"
+WORKFLOW_LOCK_DIR="${WORKFLOW_LOCK_DIR:-$STATE_ROOT/locks/rebuild-world.lock}"
+WORLD_TARGET="${WORLD_TARGET:-${CANONICAL_WORLD_TARGET:-selfhost-world}}"
+BUILD_TARGETS=""
+SLICE_TARGETS=""
+INSTALL_TARGETS=""
+FETCH_TARGETS=1
+PREFETCH_ONLY=0
+PUBLISH_ONLY=0
+FORCE_REBUILD=0
+VALIDATE_WORLD=1
+WITH_INSTALLED_DEPENDENTS=0
+COORDINATED_MODE=0
+CURRENT_PHASE="initializing"
+WORKFLOW_LOG=""
+LOCK_ACQUIRED=0
+TEMP_DIR=""
+SELECTED_TARGETS_FILE=""
+ORDERED_TARGETS_FILE=""
+ORDERED_BUILD_TARGETS=""
+REBUILT_TARGETS=""
+CACHED_TARGETS=""
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: slopos-rebuild-world [--package <name> ...] [--slice <name> ...] [--with-installed-dependents] [--install-target <name> ...] [--world-target <name>] [--no-fetch] [--publish-only]
+
+  --package <name>         Rebuild one managed package from source into the guest cache (may be repeated).
+  --slice <name>           Rebuild the full resolved runtime closure for a slice/meta-package target.
+  --with-installed-dependents
+                            Expand explicit package targets to include their installed reverse dependents.
+  --install-target <name>  Install an explicit target after the rebuild publish step (may be repeated).
+  --world-target <name>    Override the canonical world/bootstrap target used for upgrade fallback checks.
+  --no-fetch               Skip sloppkg fetch during the readiness preflight.
+  --prefetch-only          Resolve and fetch/verify distfiles for the expanded rebuild set, then stop.
+  --publish-only           Stop after rebuild + repo publish without install/upgrade convergence.
+  --force-rebuild          Ignore matching package-cache entries and rebuild every selected package.
+  --no-validate            Skip the post-convergence managed-world validation pass.
+
+By default the workflow reuses a matching cached package archive when the
+selected recipe hash is already packaged. Use --force-rebuild to restage the
+selected packages even when the cache is already current.
+
+Leaf rebuilds keep the older batch behavior: ensure the selected package set is
+ready in cache, publish once, then install explicit targets or converge the
+recorded world.
+
+Coordinated rebuild waves are triggered by `--slice` and/or
+`--with-installed-dependents`. Those rebuilds expand the affected package set,
+order it through `sloppkg resolve`, and converge the recorded managed world
+after each rebuilt package so later packages build against the refreshed root.
+Successful install/upgrade flows validate the converged guest before reporting
+success unless --no-validate is requested explicitly.
+
+Rebuild publishes land in a candidate repo view by default. Convergence uses the
+local recipe tree with publish maintenance suppressed, and stable is left
+unchanged until a separate promotion step.
+EOF
+}
+
+append_build_target() {
+  if [ -z "$BUILD_TARGETS" ]; then
+    BUILD_TARGETS="$1"
+  else
+    BUILD_TARGETS="$BUILD_TARGETS $1"
+  fi
+}
+
+append_install_target() {
+  if [ -z "$INSTALL_TARGETS" ]; then
+    INSTALL_TARGETS="$1"
+  else
+    INSTALL_TARGETS="$INSTALL_TARGETS $1"
+  fi
+}
+
+append_slice_target() {
+  if [ -z "$SLICE_TARGETS" ]; then
+    SLICE_TARGETS="$1"
+  else
+    SLICE_TARGETS="$SLICE_TARGETS $1"
+  fi
+}
+
+append_rebuilt_target() {
+  if [ -z "$REBUILT_TARGETS" ]; then
+    REBUILT_TARGETS="$1"
+  else
+    REBUILT_TARGETS="$REBUILT_TARGETS $1"
+  fi
+}
+
+append_cached_target() {
+  if [ -z "$CACHED_TARGETS" ]; then
+    CACHED_TARGETS="$1"
+  else
+    CACHED_TARGETS="$CACHED_TARGETS $1"
+  fi
+}
+
+set_phase() {
+  CURRENT_PHASE="$1"
+}
+
+log_line() {
+  timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf '[%s] %s\n' "$timestamp" "$*" >>"$WORKFLOW_LOG"
+}
+
+acquire_lock() {
+  mkdir -p "$STATE_ROOT" "$WORKFLOW_LOG_DIR" "$(dirname "$WORKFLOW_LOCK_DIR")"
+  if mkdir "$WORKFLOW_LOCK_DIR" 2>/dev/null; then
+    LOCK_ACQUIRED=1
+    printf '%s\n' "$$" >"$WORKFLOW_LOCK_DIR/pid"
+    return 0
+  fi
+
+  stale_pid=""
+  if [ -f "$WORKFLOW_LOCK_DIR/pid" ]; then
+    stale_pid="$(cat "$WORKFLOW_LOCK_DIR/pid" 2>/dev/null || true)"
+  fi
+  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+    rm -rf "$WORKFLOW_LOCK_DIR"
+    if mkdir "$WORKFLOW_LOCK_DIR" 2>/dev/null; then
+      LOCK_ACQUIRED=1
+      printf '%s\n' "$$" >"$WORKFLOW_LOCK_DIR/pid"
+      return 0
+    fi
+  fi
+
+  echo "Another rebuild workflow is already running for $STATE_ROOT" >&2
+  if [ -n "$stale_pid" ]; then
+    echo "Lock owner pid: $stale_pid" >&2
+  fi
+  exit 1
+}
+
+cleanup() {
+  status=$?
+  if [ -n "$WORKFLOW_LOG" ]; then
+    if [ "$status" -eq 0 ]; then
+      log_line "workflow complete"
+    else
+      log_line "workflow failed during phase: $CURRENT_PHASE"
+      echo "Managed-world rebuild workflow failed during phase: $CURRENT_PHASE" >&2
+      echo "workflow_log: $WORKFLOW_LOG" >&2
+    fi
+  fi
+  if [ "$LOCK_ACQUIRED" = "1" ]; then
+    rm -rf "$WORKFLOW_LOCK_DIR"
+  fi
+  if [ -n "$TEMP_DIR" ]; then
+    rm -rf "$TEMP_DIR"
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT HUP INT TERM
+
+create_temp_state() {
+  TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/slopos-rebuild-world.XXXXXX")"
+  SELECTED_TARGETS_FILE="$TEMP_DIR/selected-targets.txt"
+  ORDERED_TARGETS_FILE="$TEMP_DIR/ordered-targets.txt"
+  : >"$SELECTED_TARGETS_FILE"
+  : >"$ORDERED_TARGETS_FILE"
+}
+
+append_selected_target() {
+  target="$1"
+  [ -n "$target" ] || return 0
+  if grep -Fqx "$target" "$SELECTED_TARGETS_FILE" 2>/dev/null; then
+    return 0
+  fi
+  printf '%s\n' "$target" >>"$SELECTED_TARGETS_FILE"
+}
+
+append_plan_targets_from_stdin() {
+  python3 -c '
+import json
+import pathlib
+import sys
+
+target_file = pathlib.Path(sys.argv[1])
+seen = set()
+entries = []
+for line in target_file.read_text().splitlines():
+    line = line.strip()
+    if line and line not in seen:
+        entries.append(line)
+        seen.add(line)
+
+data = json.load(sys.stdin)
+for package in data.get("packages", []):
+    name = str(package.get("name", "")).strip()
+    if name and name not in seen:
+        entries.append(name)
+        seen.add(name)
+
+target_file.write_text("".join(f"{name}\n" for name in entries))
+' "$SELECTED_TARGETS_FILE"
+}
+
+append_dependents_from_stdin() {
+  python3 -c '
+import json
+import pathlib
+import sys
+
+target_file = pathlib.Path(sys.argv[1])
+seen = set()
+entries = []
+for line in target_file.read_text().splitlines():
+    line = line.strip()
+    if line and line not in seen:
+        entries.append(line)
+        seen.add(line)
+
+data = json.load(sys.stdin)
+for package in data.get("packages", []):
+    name = str(package.get("package_name", "")).strip()
+    if name and name not in seen:
+        entries.append(name)
+        seen.add(name)
+
+target_file.write_text("".join(f"{name}\n" for name in entries))
+' "$SELECTED_TARGETS_FILE"
+}
+
+expand_slice_targets() {
+  for target in $SLICE_TARGETS; do
+    log_line "expand slice target=$target"
+    "$GUEST_SLOPPKG_BIN" \
+      --state-root "$STATE_ROOT" \
+      --recipe-root "$GUEST_RECIPE_ROOT" \
+      resolve \
+      --json \
+      "$target" | append_plan_targets_from_stdin
+  done
+}
+
+expand_installed_dependents() {
+  for target in $BUILD_TARGETS; do
+    log_line "expand installed dependents target=$target"
+    "$GUEST_SLOPPKG_BIN" \
+      --state-root "$STATE_ROOT" \
+      dependents \
+      --json \
+      --transitive \
+      "$target" | append_dependents_from_stdin
+  done
+}
+
+order_selected_targets() {
+  set -- \
+    "$GUEST_SLOPPKG_BIN" \
+    --state-root "$STATE_ROOT" \
+    --recipe-root "$GUEST_RECIPE_ROOT" \
+    resolve \
+    --json
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    set -- "$@" "$target"
+  done < "$SELECTED_TARGETS_FILE"
+
+  "$@" | python3 -c '
+import json
+import pathlib
+import sys
+
+selected = [
+    line.strip()
+    for line in pathlib.Path(sys.argv[1]).read_text().splitlines()
+    if line.strip()
+]
+selected_set = set(selected)
+ordered = []
+seen = set()
+
+data = json.load(sys.stdin)
+for package in data.get("packages", []):
+    name = str(package.get("name", "")).strip()
+    if name in selected_set and name not in seen:
+        ordered.append(name)
+        seen.add(name)
+
+for name in selected:
+    if name not in seen:
+        ordered.append(name)
+        seen.add(name)
+
+pathlib.Path(sys.argv[2]).write_text("".join(f"{name}\n" for name in ordered))
+' "$SELECTED_TARGETS_FILE" "$ORDERED_TARGETS_FILE"
+}
+
+build_target_summary() {
+  tr '\n' ' ' < "$ORDERED_TARGETS_FILE" | sed 's/[[:space:]]*$//'
+}
+
+cache_status_for_target() {
+  target="$1"
+  "$GUEST_SLOPPKG_BIN" \
+    --state-root "$STATE_ROOT" \
+    --recipe-root "$GUEST_RECIPE_ROOT" \
+    cache-status \
+    --json \
+    "$target" | python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])'
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --package)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      append_build_target "$2"
+      shift 2
+      ;;
+    --slice)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      append_slice_target "$2"
+      shift 2
+      ;;
+    --with-installed-dependents)
+      WITH_INSTALLED_DEPENDENTS=1
+      shift
+      ;;
+    --install-target)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      append_install_target "$2"
+      shift 2
+      ;;
+    --world-target)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      WORLD_TARGET="$2"
+      shift 2
+      ;;
+    --no-fetch)
+      FETCH_TARGETS=0
+      shift
+      ;;
+    --prefetch-only)
+      PREFETCH_ONLY=1
+      shift
+      ;;
+    --publish-only)
+      PUBLISH_ONLY=1
+      shift
+      ;;
+    --force-rebuild)
+      FORCE_REBUILD=1
+      shift
+      ;;
+    --no-validate)
+      VALIDATE_WORLD=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$BUILD_TARGETS" ] && [ -z "$SLICE_TARGETS" ]; then
+  echo "At least one --package or --slice target is required." >&2
+  usage
+  exit 1
+fi
+
+if [ -n "$SLICE_TARGETS" ] || [ "$WITH_INSTALLED_DEPENDENTS" = "1" ]; then
+  COORDINATED_MODE=1
+fi
+
+if [ "$COORDINATED_MODE" = "1" ] && [ -n "$INSTALL_TARGETS" ]; then
+  echo "--install-target is not supported with coordinated rebuild waves." >&2
+  exit 1
+fi
+
+if [ "$COORDINATED_MODE" = "1" ] && [ "$PUBLISH_ONLY" = "1" ]; then
+  echo "--publish-only is not supported with coordinated rebuild waves." >&2
+  exit 1
+fi
+
+if [ "$PREFETCH_ONLY" = "1" ] && [ "$FETCH_TARGETS" = "0" ]; then
+  echo "--prefetch-only requires sloppkg fetch during readiness; do not combine it with --no-fetch." >&2
+  exit 1
+fi
+
+if [ "$PREFETCH_ONLY" = "1" ] && [ "$PUBLISH_ONLY" = "1" ]; then
+  echo "--prefetch-only stops after readiness and cannot be combined with --publish-only." >&2
+  exit 1
+fi
+
+if [ "$PREFETCH_ONLY" = "1" ] && [ -n "$INSTALL_TARGETS" ]; then
+  echo "--prefetch-only stops before install/upgrade convergence and cannot be combined with --install-target." >&2
+  exit 1
+fi
+
+if [ ! -x "$GUEST_SLOPPKG_BIN" ]; then
+  echo "Missing guest sloppkg binary: $GUEST_SLOPPKG_BIN" >&2
+  exit 1
+fi
+
+if [ ! -x "$SLOPOS_VALIDATE_REBUILD_READINESS" ]; then
+  echo "Missing readiness helper: $SLOPOS_VALIDATE_REBUILD_READINESS" >&2
+  exit 1
+fi
+
+if [ ! -x "$SLOPOS_PUBLISH_HTTP_REPO" ]; then
+  echo "Missing publish helper: $SLOPOS_PUBLISH_HTTP_REPO" >&2
+  exit 1
+fi
+
+if [ "$PUBLISH_ONLY" != "1" ] && [ -z "$INSTALL_TARGETS" ] && [ ! -x "$SLOPOS_SYNC_WORLD" ]; then
+  echo "Missing world sync helper: $SLOPOS_SYNC_WORLD" >&2
+  exit 1
+fi
+
+if [ "$VALIDATE_WORLD" = "1" ] && [ "$PREFETCH_ONLY" != "1" ] && [ "$PUBLISH_ONLY" != "1" ] && [ ! -x "$SLOPOS_VALIDATE_MANAGED_WORLD" ]; then
+  echo "Missing managed-world validation helper: $SLOPOS_VALIDATE_MANAGED_WORLD" >&2
+  exit 1
+fi
+
+timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+WORKFLOW_LOG="$WORKFLOW_LOG_DIR/${timestamp}-$$.log"
+acquire_lock
+create_temp_state
+log_line "workflow start"
+log_line "build_targets: ${BUILD_TARGETS:-<none>}"
+log_line "slice_targets: ${SLICE_TARGETS:-<none>}"
+log_line "install_targets: ${INSTALL_TARGETS:-<none>}"
+log_line "world_target: ${WORLD_TARGET:-<none>}"
+log_line "stable_repo: $STABLE_REPO_NAME channel=$STABLE_CHANNEL"
+log_line "candidate_repo: $CANDIDATE_REPO_NAME channel=$CANDIDATE_CHANNEL"
+log_line "prefetch_only: $PREFETCH_ONLY"
+log_line "publish_only: $PUBLISH_ONLY"
+log_line "force_rebuild: $FORCE_REBUILD"
+log_line "validate_world: $VALIDATE_WORLD"
+log_line "with_installed_dependents: $WITH_INSTALLED_DEPENDENTS"
+log_line "coordinated_mode: $COORDINATED_MODE"
+
+for target in $BUILD_TARGETS; do
+  append_selected_target "$target"
+done
+
+if [ -n "$SLICE_TARGETS" ]; then
+  expand_slice_targets
+fi
+
+if [ "$WITH_INSTALLED_DEPENDENTS" = "1" ]; then
+  expand_installed_dependents
+fi
+
+if [ "$COORDINATED_MODE" = "1" ]; then
+  order_selected_targets
+else
+  cp "$SELECTED_TARGETS_FILE" "$ORDERED_TARGETS_FILE"
+fi
+
+ORDERED_BUILD_TARGETS="$(build_target_summary)"
+if [ -z "$ORDERED_BUILD_TARGETS" ]; then
+  echo "Expanded rebuild target set is empty." >&2
+  exit 1
+fi
+log_line "ordered_targets: $ORDERED_BUILD_TARGETS"
+
+set -- "$SLOPOS_VALIDATE_REBUILD_READINESS"
+while IFS= read -r target; do
+  [ -n "$target" ] || continue
+  set -- "$@" --package "$target"
+done < "$ORDERED_TARGETS_FILE"
+if [ -n "$WORLD_TARGET" ]; then
+  set -- "$@" --world-target "$WORLD_TARGET"
+fi
+if [ "$FETCH_TARGETS" = "0" ]; then
+  set -- "$@" --no-fetch
+fi
+
+echo "==> Validating managed-world rebuild readiness"
+set_phase "readiness"
+log_line "phase readiness"
+"$@"
+
+if [ "$PREFETCH_ONLY" = "1" ]; then
+  set_phase "complete"
+  echo "Managed-world rebuild prefetch completed."
+  echo "  planned_packages: $ORDERED_BUILD_TARGETS"
+  echo "  distfiles_prefetched: yes"
+  echo "  workflow_log: $WORKFLOW_LOG"
+  exit 0
+fi
+
+while IFS= read -r target; do
+  [ -n "$target" ] || continue
+  cache_status="missing"
+  if [ "$FORCE_REBUILD" != "1" ]; then
+    set_phase "cache-status:$target"
+    log_line "phase cache-status package=$target"
+    cache_status="$(cache_status_for_target "$target")"
+    log_line "cache-status package=$target status=$cache_status"
+  fi
+
+  if [ "$FORCE_REBUILD" != "1" ] && [ "$cache_status" = "ready" ]; then
+    echo "==> Reusing cached package: $target"
+    log_line "phase cache-hit package=$target"
+    append_cached_target "$target"
+  else
+    echo "==> Rebuilding package: $target"
+    set_phase "build:$target"
+    log_line "phase build package=$target"
+    "$GUEST_SLOPPKG_BIN" \
+      --state-root "$STATE_ROOT" \
+      --recipe-root "$GUEST_RECIPE_ROOT" \
+      build "$target"
+    append_rebuilt_target "$target"
+  fi
+  if [ "$COORDINATED_MODE" = "1" ]; then
+    echo "==> Converging managed world after rebuild: $target"
+    set_phase "upgrade:$target"
+    log_line "phase upgrade package=$target"
+    CANONICAL_WORLD_TARGET="$WORLD_TARGET" \
+      GUEST_RECIPE_ROOT="$GUEST_RECIPE_ROOT" \
+      "$SLOPOS_SYNC_WORLD" \
+      --skip-publish \
+      --recipe-root "$GUEST_RECIPE_ROOT" \
+      --skip-publish-maintenance
+  fi
+done < "$ORDERED_TARGETS_FILE"
+
+echo "==> Publishing refreshed candidate guest repo snapshot"
+set_phase "publish"
+log_line "phase publish"
+env \
+  GUEST_RECIPE_ROOT="$GUEST_RECIPE_ROOT" \
+  REPO_NAME="$CANDIDATE_REPO_NAME" \
+  CHANNEL="$CANDIDATE_CHANNEL" \
+  REVISION="$CANDIDATE_REVISION" \
+  NO_REMEMBER=1 \
+  SKIP_REPO_CONFIG=1 \
+  "$SLOPOS_PUBLISH_HTTP_REPO"
+
+if [ "$PUBLISH_ONLY" = "1" ]; then
+  set_phase "complete"
+  echo "Rebuild publish completed without install/upgrade convergence."
+  echo "  planned_packages: $ORDERED_BUILD_TARGETS"
+  echo "  rebuilt_packages: ${REBUILT_TARGETS:-<none>}"
+  if [ -n "$CACHED_TARGETS" ]; then
+    echo "  reused_cached_packages: $CACHED_TARGETS"
+  fi
+  echo "  candidate_repo: $CANDIDATE_REPO_NAME"
+  echo "  candidate_channel: $CANDIDATE_CHANNEL"
+  echo "  workflow_log: $WORKFLOW_LOG"
+  exit 0
+fi
+
+run_validation() {
+  if [ "$VALIDATE_WORLD" != "1" ]; then
+    return 0
+  fi
+  echo "==> Validating managed world"
+  set_phase "validate"
+  log_line "phase validate"
+  set -- "$SLOPOS_VALIDATE_MANAGED_WORLD"
+  if [ -n "$WORLD_TARGET" ]; then
+    set -- "$@" --world-target "$WORLD_TARGET"
+  fi
+  env \
+    GUEST_RECIPE_ROOT="$GUEST_RECIPE_ROOT" \
+    REPO_NAME="$CANDIDATE_REPO_NAME" \
+    CHANNEL="$CANDIDATE_CHANNEL" \
+    REVISION="$CANDIDATE_REVISION" \
+    NO_REMEMBER=1 \
+    SKIP_REPO_CONFIG=1 \
+    "$@"
+}
+
+if [ "$COORDINATED_MODE" = "1" ]; then
+  run_validation
+  set_phase "complete"
+  echo "Managed-world rebuild workflow completed."
+  echo "  planned_packages: $ORDERED_BUILD_TARGETS"
+  echo "  rebuilt_packages: ${REBUILT_TARGETS:-<none>}"
+  if [ -n "$CACHED_TARGETS" ]; then
+    echo "  reused_cached_packages: $CACHED_TARGETS"
+  fi
+  echo "  coordinated_mode: yes"
+  if [ "$VALIDATE_WORLD" = "1" ]; then
+    echo "  validation: passed"
+  else
+    echo "  validation: skipped"
+  fi
+  echo "  candidate_repo: $CANDIDATE_REPO_NAME"
+  echo "  candidate_channel: $CANDIDATE_CHANNEL"
+  echo "  promote_hint: sloppkg --state-root $STATE_ROOT repo promote --source-name $CANDIDATE_REPO_NAME --source-channel $CANDIDATE_CHANNEL --target-name $STABLE_REPO_NAME --target-channel $STABLE_CHANNEL"
+  echo "  workflow_log: $WORKFLOW_LOG"
+  exit 0
+fi
+
+if [ -n "$INSTALL_TARGETS" ]; then
+  for target in $INSTALL_TARGETS; do
+    echo "==> Installing target: $target"
+    set_phase "install:$target"
+    log_line "phase install target=$target"
+    "$GUEST_SLOPPKG_BIN" \
+      --state-root "$STATE_ROOT" \
+      --recipe-root "$GUEST_RECIPE_ROOT" \
+      install "$target" \
+      --root / \
+      --skip-publish-maintenance
+  done
+else
+  echo "==> Converging recorded managed world"
+  set_phase "upgrade-world"
+  log_line "phase upgrade-world"
+  CANONICAL_WORLD_TARGET="$WORLD_TARGET" \
+    GUEST_RECIPE_ROOT="$GUEST_RECIPE_ROOT" \
+    "$SLOPOS_SYNC_WORLD" \
+    --skip-publish \
+    --recipe-root "$GUEST_RECIPE_ROOT" \
+    --skip-publish-maintenance
+fi
+
+run_validation
+set_phase "complete"
+echo "Managed-world rebuild workflow completed."
+echo "  planned_packages: $ORDERED_BUILD_TARGETS"
+echo "  rebuilt_packages: ${REBUILT_TARGETS:-<none>}"
+if [ -n "$CACHED_TARGETS" ]; then
+  echo "  reused_cached_packages: $CACHED_TARGETS"
+fi
+if [ -n "$INSTALL_TARGETS" ]; then
+  echo "  installed_targets: $INSTALL_TARGETS"
+else
+  echo "  converged_world: yes"
+fi
+if [ "$VALIDATE_WORLD" = "1" ]; then
+  echo "  validation: passed"
+else
+  echo "  validation: skipped"
+fi
+echo "  candidate_repo: $CANDIDATE_REPO_NAME"
+echo "  candidate_channel: $CANDIDATE_CHANNEL"
+echo "  promote_hint: sloppkg --state-root $STATE_ROOT repo promote --source-name $CANDIDATE_REPO_NAME --source-channel $CANDIDATE_CHANNEL --target-name $STABLE_REPO_NAME --target-channel $STABLE_CHANNEL"
+echo "  workflow_log: $WORKFLOW_LOG"

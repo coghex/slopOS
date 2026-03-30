@@ -13,7 +13,7 @@ The system has four main layers:
 - Buildroot in `buildroot-src/` produces the kernel and root filesystem artifacts
 - a separate Buildroot recovery profile produces a tiny initramfs for break-glass boots
 - host-side scripts in `scripts/` build artifacts, seed disk images, and launch QEMU
-- guest-side overlay files in `board/rootfs-overlay/` customize boot behavior and persistence
+- checked-in normal-seed files in `board/normal-rootfs-tree/` plus mutable host-provided seed inputs in `board/rootfs-overlay/` customize boot behavior and persistence
 - `rootfs/bootstrap-manifest.toml` records the ownership boundary between Buildroot stage0 and the first `sloppkg` bootstrap world
 
 The result is a guest with:
@@ -146,8 +146,73 @@ This disk is used for large durable state that is convenient to keep separate fr
 - `scripts/build-native-binutils.sh`
 - `scripts/build-native-glibc.sh`
 - `scripts/build-native-gcc.sh`
+- `scripts/build-guest-kernel-artifacts.sh`
+- `scripts/promote-guest-kernel-candidate.sh`
+- `scripts/build-guest-rootfs-artifacts.sh`
+- `scripts/audit-guest-ext4-sealing.sh`
+- `scripts/validate-guest-mke2fs-d-support.sh`
+- `scripts/validate-guest-rootfs-artifacts.sh`
+- `scripts/validate-guest-rootfs-boot-candidate.sh`
+- `scripts/validate-guest-combined-boot-candidate.sh`
+- `scripts/promote-guest-boot-default.sh`
+- `scripts/validate-promoted-boot-default.sh`
 
 These build a native AArch64 toolchain inside the guest, using the persistent data disk for sources, build trees, and install roots.
+
+`scripts/build-guest-kernel-artifacts.sh` stages the current normal-image kernel
+inputs into the guest and invokes the checked-in guest helper
+`/usr/sbin/slopos-build-kernel-artifacts`, which builds a native ARM64 `Image`
+plus modules under `/Volumes/slopos-data/kernel/artifacts/` without replacing
+the normal boot kernel yet. `scripts/promote-guest-kernel-candidate.sh` copies
+the latest guest-built kernel artifact back to
+`artifacts/guest-kernel-candidate/current/Image` for explicit host-side kernel
+handoff testing, and `run-phase2.sh` now accepts `KERNEL_IMAGE=...` for that
+opt-in path while leaving the default Buildroot kernel unchanged.
+
+`scripts/build-guest-rootfs-artifacts.sh` stages a plain tar archive of the current
+Buildroot normal rootfs tree plus the checked-in normal seed inputs into the
+guest and invokes `/usr/sbin/slopos-build-rootfs-artifacts`, which reruns the
+same `board/normal-post-fakeroot.sh` assembly logic in-guest, archives the
+assembled tree as a plain tar stream, and now seals `rootfs.ext4` in-guest with
+`mke2fs -d` on the current rebuilt seed image. The plain-tar staging/archiving
+keeps the workflow independent of a seeded `gzip` binary or Python compression
+modules. `scripts/build-guest-rootfs-artifacts.sh` still keeps the old
+host/Lima sealing path as a compatibility fallback for older guests that have
+not yet been reseeded onto the new e2fsprogs-capable image.
+The companion
+`scripts/validate-guest-rootfs-artifacts.sh` copies the latest guest-built image
+back to the host, runs the existing isolated normal-image validator against it,
+and publishes the validated result to
+`artifacts/guest-rootfs-candidate/current/rootfs.ext4` for explicit host-side
+boot handoff testing. `scripts/validate-guest-rootfs-boot-candidate.sh` then
+boots `run-phase2.sh` through that host-side candidate path with
+`ROOTFS_SOURCE_IMAGE=...` plus `RESET_ROOT_DISK=1`, while still keeping the
+Buildroot kernel, so the opt-in handoff can be proven before any broader
+promotion. `scripts/validate-guest-combined-boot-candidate.sh` then combines
+that rootfs candidate with
+`KERNEL_IMAGE=artifacts/guest-kernel-candidate/current/Image` to prove the full
+guest-built kernel+rootfs opt-in boot path.
+
+`scripts/audit-guest-ext4-sealing.sh` stages and runs the checked-in guest
+helper `/usr/sbin/slopos-audit-ext4-sealing-prereqs`, copies the resulting
+report back under `artifacts/guest-ext4-sealing-audit/current/`, and records
+the host-side kernel-config/defconfig context for the current blockers that
+still keep the rootfs workflow hybrid.
+
+`scripts/validate-guest-mke2fs-d-support.sh` boots a temporary VM from the
+current rebuilt seed image, proves that guest ext4 sealing is now available
+through `mke2fs -d`, builds a guest rootfs artifact on that temporary VM, and
+verifies the resulting manifest records `seal_method = "guest-mke2fs-d"`.
+
+`scripts/promote-guest-boot-default.sh` then copies the current host-side guest
+rootfs and kernel candidates into `artifacts/guest-boot-promoted/current/`
+without overwriting any Buildroot output. When that promoted path exists,
+`ensure-root-disk.sh` and `run-phase2.sh` use it as the default normal boot
+source unless the caller explicitly sets `ROOTFS_SOURCE_IMAGE=...` or
+`KERNEL_IMAGE=...`. `scripts/validate-promoted-boot-default.sh` proves that
+default-selection behavior through a temporary VM, and
+`scripts/promote-guest-boot-default.sh --clear` removes the promoted default so
+future boots fall back to the Buildroot artifacts again.
 
 The older `scripts/build-selfhost-*.sh` helpers are now best treated as fallback/manual debugging tools. The supported steady-state toolchain workflow is the package-managed path:
 
@@ -172,13 +237,13 @@ Those helpers still exist because they are useful when isolating recipe bugs or 
 - `scripts/install-sloppkg-guest-package.sh`
   Cross-builds the guest `sloppkg` ELF, seeds the `sloppkg` recipe into the guest's persistent recipe repo, and reinstalls `sloppkg` through package management so it can upgrade itself later.
 
-The workspace recipe repo now carries eight validated general-purpose source package waves around the selfhost core. The first wave is `zlib 1.3.2-1`, `xz 5.8.2-1`, `pkgconf 2.3.0-1`, `libffi 3.4.8-1`, `openssl 3.6.1-1`, and `dropbear 2025.89-1`. The second wave adds `expat 2.7.5-1`, `ncurses 6.6-20251231-1`, `readline 8.3-1`, `sqlite 3.51.3-1`, `zstd 1.5.7-1`, and `curl 8.19.0-1`. The third wave adds `m4 1.4.21-1`, `bison 3.8.2-1`, `flex 2.6.4-1`, `ninja 1.13.2-1`, `meson 1.10.1-1`, and `cmake 4.2.3-1`. The fourth wave adds `libtool 2.4.6-1`, `autoconf 2.72-1`, and `automake 1.16.5-1`. The fifth wave adds `patch 2.7.6-1`, `diffutils 3.12-1`, `sed 4.9-1`, `grep 3.12-1`, `gawk 5.4.0-1`, `findutils 4.10.0-1`, and `which 2.23-1`. The sixth wave adds `make 4.4.1-1`, so the guest now has a package-managed GNU Make instead of relying on the seeded base-image copy. The seventh wave adds `file 5.47-1`, including the managed `file(1)` binary, `libmagic`, and the compiled `magic.mgc` database under `/usr/local/share/misc`. The eighth wave adds `perl 5.42.0-1`, bringing the Perl interpreter, `ExtUtils::MakeMaker`, `pod2man`, `prove`, `xsubpp`, and the core module tree under `/usr/local`. The `dropbear` package installs into `/Volumes/slopos-data/opt/dropbear/current` specifically so `board/rootfs-overlay/etc/init.d/S14persistent-dropbear` can expose the persistent SSH tools at boot.
+The workspace recipe repo now carries eight validated general-purpose source package waves around the selfhost core. The first wave is `zlib 1.3.2-1`, `xz 5.8.2-1`, `pkgconf 2.3.0-1`, `libffi 3.4.8-1`, `openssl 3.6.1-1`, and `dropbear 2025.89-1`. The second wave adds `expat 2.7.5-1`, `ncurses 6.6-20251231-1`, `readline 8.3-1`, `sqlite 3.51.3-1`, `zstd 1.5.7-1`, and `curl 8.19.0-1`. The third wave adds `m4 1.4.21-1`, `bison 3.8.2-1`, `flex 2.6.4-1`, `ninja 1.13.2-1`, `meson 1.10.1-1`, and `cmake 4.2.3-1`. The fourth wave adds `libtool 2.4.6-1`, `autoconf 2.72-1`, and `automake 1.16.5-1`. The fifth wave adds `patch 2.7.6-1`, `diffutils 3.12-1`, `sed 4.9-1`, `grep 3.12-1`, `gawk 5.4.0-1`, `findutils 4.10.0-1`, and `which 2.23-1`. The sixth wave adds `make 4.4.1-1`, so the guest now has a package-managed GNU Make instead of relying on the seeded base-image copy. The seventh wave adds `file 5.47-1`, including the managed `file(1)` binary, `libmagic`, and the compiled `magic.mgc` database under `/usr/local/share/misc`. The eighth wave adds `perl 5.42.0-1`, bringing the Perl interpreter, `ExtUtils::MakeMaker`, `pod2man`, `prove`, `xsubpp`, and the core module tree under `/usr/local`. The `dropbear` package installs into `/Volumes/slopos-data/opt/dropbear/current` specifically so `board/normal-rootfs-tree/etc/init.d/S14persistent-dropbear` can expose the persistent SSH tools at boot.
 
 The build runner now prepends `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` for both source fetching and package build commands, so managed tools installed under `/usr/local/bin` participate in later recipe fetch/build steps without relying on the caller's shell profile. The `meson` wrapper also prepends the bootstrap SDK Python 3.14 library tree from `/Volumes/slopos-data/toolchain/slopos-aarch64-bootstrap-sdk/lib/python3.14` so Meson can use the full stdlib and extension modules even though the seeded guest Python is slimmer.
 
 Phase 5 validation now includes a Meson+Ninja smoke project, an Autotools+Libtool smoke project, a text-helper smoke path that exercises `sed`, `grep`, `patch`, `diff`, `find`, `xargs`, `gawk`, and `which` from `/usr/local/bin`, a dedicated GNU Make smoke build that compiles a small C program using `/usr/local/bin/make`, a `file(1)` smoke path that correctly classifies plain text, shell scripts, and managed ELF binaries using the managed magic database, and a Perl smoke path that runs `perl Makefile.PL`, `make`, `make test`, `prove -v`, and `pod2man` entirely through the managed `/usr/local` toolchain. The Autotools smoke path uses `libtoolize --copy --install`, `autoreconf -fi`, `./configure`, and `make` entirely inside the guest and successfully builds and runs a small shared-library-backed demo.
 
-Phase 6 has now started with a shell/runtime slice: `bash 5.2.37-1`, `less 692-1`, and `nano 8.7.1-1` are installed under `/usr/local/bin`, login shells source `/etc/profile.d/00-managed-path.sh` to prefer `/usr/local`, and `scripts/ssh-guest.sh` prepends that managed PATH for the common single-command case. A second phase-6 slice adds `gzip 1.14-1`, `tar 1.35-1`, and `coreutils 9.10-1`, so common archive flows and day-to-day userland commands such as `ls`, `cp`, `mv`, `rm`, `head`, `tail`, `sort`, `tr`, `basename`, `dirname`, `realpath`, and `uptime` now resolve from `/usr/local/bin`. A third phase-6 networking slice adds `iproute2 6.17.0-1`, `iputils 20250605-1`, `netcat 0.7.1-1`, `traceroute 2.1.6-1`, `wget 1.25.0-1`, and `telnet 2.6-1`, replacing the BusyBox-backed `ip`, `ping`, `traceroute`, and `telnet` commands and the seeded `wget` binary with source-built managed tools under `/usr/local/bin`; `ss` and `nc` are now available there as well. A fourth boot-adjacent staging slice adds `util-linux 2.41.3-4`, which now exposes source-built `mount`, `umount`, `mountpoint`, `findmnt`, `blkid`, and `agetty` under `/usr/local` along with the supporting util-linux libraries. A fifth boot-adjacent shell slice adds `dash 0.5.13.1-1` under `/usr/local/bin` as the candidate replacement for `/bin/sh`. The `board/rootfs-overlay/etc/init.d/S17persistent-getty` hook now normalizes the fresh seed image onto `/sbin/agetty` and later rewires both `/sbin/agetty` and `/sbin/getty` to `/usr/local/sbin/agetty` once the managed util-linux slice is installed, so both the rebuilt stage0 image and the restored persistent guest use util-linux `agetty` on `ttyAMA0` with the reseeded `shadow` `/bin/login` binary already in place. Phase 4 now switches the rebuilt stage0 image itself to `sysvinit`: `configs/slopos_aarch64_virt_defconfig` selects `BR2_INIT_SYSV`, `BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS`, `BR2_PACKAGE_UTIL_LINUX`, and `BR2_PACKAGE_UTIL_LINUX_AGETTY`, relies on sysvinit's `BR2_PACKAGE_BUSYBOX_SHOW_OTHERS` compatibility visibility so `dash`, `bash`, `dcron`, and similar alternatives stay selectable in Buildroot, and uses the overlaid `board/rootfs-overlay/etc/inittab` line `T0:12345:respawn:/sbin/agetty -L ttyAMA0 0 vt100` to preserve the existing `rcS`, `rcK`, and `ttyAMA0` contract under sysvinit syntax without a BusyBox serial-console fallback. Phase 5 makes the device-management policy explicit: `board/rootfs-overlay/etc/init.d/S18devtmpfs-policy` clears any legacy userspace hotplug helper, removes `/etc/mdev.conf`, and deletes any stale BusyBox `/sbin/mdev` symlink so the booted system is deliberately `devtmpfs`-only rather than implicitly relying on unused `mdev` behavior. The next shell/login cutover now replaces BusyBox ownership in the seeded image too: `configs/slopos_aarch64_virt_defconfig` selects `BR2_SYSTEM_BIN_SH_DASH` and enables `BR2_PACKAGE_SHADOW`, so BusyBox no longer provides `ash`, `sh`, `login`, or `getty` in the normal image. The `board/rootfs-overlay/etc/init.d/S19persistent-sh` hook repoints `/bin/sh` to the managed `/usr/local/bin/dash` on the current persistent guest, removes any stale `/bin/ash` symlink, and prunes `/bin/ash` from `/etc/shells`; on a fresh rebuilt stage0 image, the same hook falls back to `/bin/dash` so stale incremental-build `ash` links are cleaned there as well. The final normal-root cleanup then removes BusyBox from the image entirely: `configs/slopos_aarch64_virt_defconfig` no longer selects `BR2_PACKAGE_BUSYBOX`, `board/post-build.sh` strips any stale `/bin/busybox`, legacy BusyBox links, and the unused `/linuxrc` symlink from incremental outputs before the ext4 image is sealed. An isolated boot of the rebuilt image verified `/proc/1/exe -> /sbin/init`, the overlaid inittab line `T0:12345:respawn:/sbin/agetty -L ttyAMA0 0 vt100`, an empty `/proc/sys/kernel/hotplug`, no `/etc/mdev.conf`, no `/sbin/mdev`, `/bin/sh -> /bin/dash`, no `/bin/ash`, a real `/bin/login` binary from `shadow`, `/sbin/agetty` owned by util-linux, `/sbin/getty -> /sbin/agetty`, no `/bin/busybox`, no `ash`/`sh`/`login`/`getty` BusyBox applets left in the normal image, and the expected sysvinit-installed `reboot`/`poweroff` symlinks. Phase 7 is now defined by first-class meta-packages: `selfhost-base`, `selfhost-devel`, `selfhost-network`, and `selfhost-world` now describe the intended guest shape, and `selfhost-world` is installed in the persistent package state as the canonical full-system target. Phase 9 now moves the remaining repo-publish and world-convergence orchestration into guest-resident helpers: `/usr/sbin/slopos-publish-http-repo` owns the guest unified-repo publish/serve/update flow and `/usr/sbin/slopos-sync-world` owns the publish-plus-install/upgrade flow, while `scripts/publish-guest-http-repo.sh` and `scripts/sync-guest-world.sh` are just SSH transport wrappers that stage and invoke those guest helpers. Validation covers managed tool resolution for `bash`, `less`, `nano`, `gzip`, `tar`, `ls`, `cp`, `mv`, `rm`, `ip`, `ss`, `ping`, `traceroute`, `nc`, `wget`, `telnet`, `curl`, `perl`, `make`, `file`, `mount`, `umount`, `mountpoint`, `findmnt`, `blkid`, `agetty`, and `dash`, plus a gzip round-trip smoke path, a tar create/extract smoke path, representative coreutils command checks, networking smoke checks for `ip -brief link`, `ss -ltn`, `ping -c 1 127.0.0.1`, `traceroute -n -m 1 127.0.0.1`, `wget -qO- http://127.0.0.1:18083/repo.toml`, and a telnet connection to `127.0.0.1:18083`, plus a util-linux smoke path covering `findmnt /Volumes/slopos-data`, `blkid /dev/vda /dev/vdb`, a bind mount/unmount round trip, a `dash -n` audit of `/init`, `rcS`, `rcK`, `S11`-`S19`, and `/etc/profile.d/00-managed-path.sh`, a reset-to-world flow that reseeds the root disk, republishes the guest HTTP repo, runs `sloppkg --state-root /Volumes/slopos-data/pkg update` plus `sloppkg --state-root /Volumes/slopos-data/pkg upgrade --root /`, and then reboots, a live reboot check that confirmed the restored persistent guest now runs `/usr/local/sbin/agetty` on `ttyAMA0`, resolves `/bin/login` to the reseeded `shadow` binary, resolves `/bin/sh` to `/usr/local/bin/dash`, leaves `/bin/ash` absent, keeps `/dev` on `devtmpfs`, leaves `/proc/sys/kernel/hotplug` empty, and preserves the persistent `sloppkg` exposure, and isolated rebuilt-image boots that confirmed sysvinit becomes PID 1 with no BusyBox-backed links left under `/bin`, `/sbin`, `/usr/bin`, or `/usr/sbin`, and that the final normal image no longer ships `/bin/busybox` at all. After the validated reset-to-world replay, `sloppkg doctor` reported 76 managed packages. `dig`, `tcpdump`, and `nmap` are not yet packaged.
+Phase 6 has now started with a shell/runtime slice: `bash 5.2.37-1`, `less 692-1`, and `nano 8.7.1-1` are installed under `/usr/local/bin`, login shells source `/etc/profile.d/00-managed-path.sh` to prefer `/usr/local`, and `scripts/ssh-guest.sh` prepends that managed PATH for the common single-command case. A second phase-6 slice adds `gzip 1.14-1`, `tar 1.35-1`, and `coreutils 9.10-1`, so common archive flows and day-to-day userland commands such as `ls`, `cp`, `mv`, `rm`, `head`, `tail`, `sort`, `tr`, `basename`, `dirname`, `realpath`, and `uptime` now resolve from `/usr/local/bin`. A third phase-6 networking slice adds `iproute2 6.17.0-1`, `iputils 20250605-1`, `netcat 0.7.1-1`, `traceroute 2.1.6-1`, `wget 1.25.0-1`, and `telnet 2.6-1`, replacing the BusyBox-backed `ip`, `ping`, `traceroute`, and `telnet` commands and the seeded `wget` binary with source-built managed tools under `/usr/local/bin`; `ss` and `nc` are now available there as well. A fourth boot-adjacent staging slice adds `util-linux 2.41.3-4`, which now exposes source-built `mount`, `umount`, `mountpoint`, `findmnt`, `blkid`, and `agetty` under `/usr/local` along with the supporting util-linux libraries. A fifth boot-adjacent shell slice adds `dash 0.5.13.1-1` under `/usr/local/bin` as the candidate replacement for `/bin/sh`. The `board/normal-rootfs-tree/etc/init.d/S17persistent-getty` hook now normalizes the fresh seed image onto `/sbin/agetty` and later rewires both `/sbin/agetty` and `/sbin/getty` to `/usr/local/sbin/agetty` once the managed util-linux slice is installed, so both the rebuilt stage0 image and the restored persistent guest use util-linux `agetty` on `ttyAMA0` with the reseeded `shadow` `/bin/login` binary already in place. Phase 4 now switches the rebuilt stage0 image itself to `sysvinit`: `configs/slopos_aarch64_virt_defconfig` selects `BR2_INIT_SYSV`, `BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS`, `BR2_PACKAGE_UTIL_LINUX`, and `BR2_PACKAGE_UTIL_LINUX_AGETTY`, relies on sysvinit's `BR2_PACKAGE_BUSYBOX_SHOW_OTHERS` compatibility visibility so `dash`, `bash`, `dcron`, and similar alternatives stay selectable in Buildroot, and uses the overlaid `board/normal-rootfs-tree/etc/inittab` line `T0:12345:respawn:/sbin/agetty -L ttyAMA0 0 vt100` to preserve the existing `rcS`, `rcK`, and `ttyAMA0` contract under sysvinit syntax without a BusyBox serial-console fallback. Phase 5 makes the device-management policy explicit: `board/normal-rootfs-tree/etc/init.d/S18devtmpfs-policy` clears any legacy userspace hotplug helper, removes `/etc/mdev.conf`, and deletes any stale BusyBox `/sbin/mdev` symlink so the booted system is deliberately `devtmpfs`-only rather than implicitly relying on unused `mdev` behavior. The next shell/login cutover now replaces BusyBox ownership in the seeded image too: `configs/slopos_aarch64_virt_defconfig` selects `BR2_SYSTEM_BIN_SH_DASH` and enables `BR2_PACKAGE_SHADOW`, so BusyBox no longer provides `ash`, `sh`, `login`, or `getty` in the normal image. The `board/normal-rootfs-tree/etc/init.d/S19persistent-sh` hook repoints `/bin/sh` to the managed `/usr/local/bin/dash` on the current persistent guest, removes any stale `/bin/ash` symlink, and prunes `/bin/ash` from `/etc/shells`; on a fresh rebuilt stage0 image, the same hook falls back to `/bin/dash` so stale incremental-build `ash` links are cleaned there as well. The final normal-root cleanup then removes BusyBox from the image entirely: `configs/slopos_aarch64_virt_defconfig` no longer selects `BR2_PACKAGE_BUSYBOX`, `board/normal-post-fakeroot.sh` explicitly installs the checked-in normal seed tree, strips any stale `/bin/busybox`, legacy BusyBox links, and the unused `/linuxrc` symlink from the final target, and imports mutable host-provided SSH authorization data from `board/rootfs-overlay/root/.ssh/authorized_keys` when present before the ext4 image is sealed. An isolated boot of the rebuilt image verified `/proc/1/exe -> /sbin/init`, the overlaid inittab line `T0:12345:respawn:/sbin/agetty -L ttyAMA0 0 vt100`, an empty `/proc/sys/kernel/hotplug`, no `/etc/mdev.conf`, no `/sbin/mdev`, `/bin/sh -> /bin/dash`, no `/bin/ash`, a real `/bin/login` binary from `shadow`, `/sbin/agetty` owned by util-linux, `/sbin/getty -> /sbin/agetty`, no `/bin/busybox`, no `ash`/`sh`/`login`/`getty` BusyBox applets left in the normal image, and the expected sysvinit-installed `reboot`/`poweroff` symlinks. Phase 7 is now defined by first-class meta-packages: `selfhost-base`, `selfhost-devel`, `selfhost-network`, and `selfhost-world` now describe the intended guest shape, and `selfhost-world` is installed in the persistent package state as the canonical full-system target. Phase 9 now moves the remaining repo-publish and world-convergence orchestration into guest-resident helpers: `/usr/sbin/slopos-publish-http-repo` owns the guest unified-repo publish/serve/update flow and `/usr/sbin/slopos-sync-world` owns the publish-plus-install/upgrade flow, while `scripts/publish-guest-http-repo.sh` and `scripts/sync-guest-world.sh` are just SSH transport wrappers that stage and invoke those guest helpers. Validation covers managed tool resolution for `bash`, `less`, `nano`, `gzip`, `tar`, `ls`, `cp`, `mv`, `rm`, `ip`, `ss`, `ping`, `traceroute`, `nc`, `wget`, `telnet`, `curl`, `perl`, `make`, `file`, `mount`, `umount`, `mountpoint`, `findmnt`, `blkid`, `agetty`, and `dash`, plus a gzip round-trip smoke path, a tar create/extract smoke path, representative coreutils command checks, networking smoke checks for `ip -brief link`, `ss -ltn`, `ping -c 1 127.0.0.1`, `traceroute -n -m 1 127.0.0.1`, `wget -qO- http://127.0.0.1:18083/repo.toml`, and a telnet connection to `127.0.0.1:18083`, plus a util-linux smoke path covering `findmnt /Volumes/slopos-data`, `blkid /dev/vda /dev/vdb`, a bind mount/unmount round trip, a `dash -n` audit of `/init`, `rcS`, `rcK`, `S11`-`S19`, and `/etc/profile.d/00-managed-path.sh`, a reset-to-world flow that reseeds the root disk, republishes the guest HTTP repo, runs `sloppkg --state-root /Volumes/slopos-data/pkg update` plus `sloppkg --state-root /Volumes/slopos-data/pkg upgrade --root /`, and then reboots, a live reboot check that confirmed the restored persistent guest now runs `/usr/local/sbin/agetty` on `ttyAMA0`, resolves `/bin/login` to the reseeded `shadow` binary, resolves `/bin/sh` to `/usr/local/bin/dash`, leaves `/bin/ash` absent, keeps `/dev` on `devtmpfs`, leaves `/proc/sys/kernel/hotplug` empty, and preserves the persistent `sloppkg` exposure, and isolated rebuilt-image boots that confirmed sysvinit becomes PID 1 with no BusyBox-backed links left under `/bin`, `/sbin`, `/usr/bin`, or `/usr/sbin`, and that the final normal image no longer ships `/bin/busybox` at all. After the validated reset-to-world replay, `sloppkg doctor` reported 76 managed packages. `dig`, `tcpdump`, and `nmap` are not yet packaged.
 
 ## Build outputs
 
@@ -190,6 +255,44 @@ Important files under `artifacts/buildroot-output/`:
 - `.config` / `.config.linux-builder` - resolved Buildroot config
 - `build-time.linux-builder.log` - build log copied back from the Linux builder
 
+Important guest-native kernel artifact paths under `/Volumes/slopos-data/kernel/`:
+
+- `input/current/` - staged defconfig, kernel config, patch dir, and source tarball
+- `artifacts/<kernelrelease>-<timestamp>/` - versioned guest-built `Image`, modules, inputs, and manifest
+- `artifacts/current` - symlink to the latest validated guest-built kernel artifact set
+- `logs/` - guest-native kernel build logs
+
+Important host-side guest-kernel handoff paths under `artifacts/guest-kernel-candidate/`:
+
+- `current/Image` - latest guest-built kernel image copied back for opt-in host boot tests
+- `current/manifest.toml` - copied guest artifact manifest for that kernel candidate
+- `current/host-handoff.toml` - host-side provenance for when the candidate was promoted
+
+Important host-side ext4 audit paths under `artifacts/guest-ext4-sealing-audit/`:
+
+- `current/report.txt` - latest guest-side ext4 sealing prerequisite audit report
+- `current/host-context.txt` - host-side kernel-config and defconfig context for that audit
+
+Important guest-native rootfs artifact paths under `/Volumes/slopos-data/rootfs/`:
+
+- `input/current/` - staged Buildroot base rootfs archive plus the checked-in seed inputs
+- `artifacts/rootfs-<timestamp>/rootfs-tree.tar` - guest-assembled rootfs tree after rerunning the normal seed assembly hook
+- `artifacts/rootfs-<timestamp>/rootfs.ext4` - guest-sealed ext4 image on rebuilt seeds, or host/Lima-sealed compatibility fallback image on older guests
+- `artifacts/current` - symlink to the latest validated guest-built rootfs artifact set
+- `logs/` - guest-native rootfs assembly logs
+
+Important host-side guest-rootfs handoff paths under `artifacts/guest-rootfs-candidate/`:
+
+- `current/rootfs.ext4` - latest validated guest-built rootfs image copied back for opt-in host boot tests
+- `current/manifest.toml` - copied guest artifact manifest for that candidate image
+- `current/host-handoff.toml` - host-side provenance for when the candidate was validated and promoted
+
+Important host-side promoted-default boot paths under `artifacts/guest-boot-promoted/`:
+
+- `current/rootfs.ext4` - promoted default rootfs seed image used when no explicit override is set
+- `current/Image` - promoted default kernel image used when no explicit override is set
+- `current/promotion.toml` - host-side provenance for the paired promoted default
+
 Important files under `artifacts/buildroot-recovery-output/`:
 
 - `images/Image` - kernel image for the recovery profile
@@ -199,7 +302,11 @@ Important files under `artifacts/buildroot-recovery-output/`:
 
 ## Guest boot-time customization
 
-The overlay in `board/rootfs-overlay/` contains the logic that makes the guest usable.
+The checked-in normal seed tree in `board/normal-rootfs-tree/` now contains the
+static repo-owned boot glue for the normal image. `board/normal-post-fakeroot.sh`
+installs that tree directly into the final normal-image target during Buildroot's
+fakeroot phase, while `board/rootfs-overlay/` is now reserved for mutable
+host-provided inputs such as `root/.ssh/authorized_keys`.
 
 The recovery userspace tree now comes from repo-owned files under
 `board/recovery-rootfs-tree/`, `board/recovery-init.c`,
@@ -260,9 +367,10 @@ Important points:
 - target architecture is AArch64
 - kernel version is `6.18.7`
 - root filesystem image generation includes ext4 via Buildroot's ext2 backend
-- the rootfs overlay comes from `../board/rootfs-overlay`
+- the normal image no longer uses a static Buildroot rootfs overlay for its checked-in boot glue
+- `board/normal-post-fakeroot.sh` installs the checked-in `board/normal-rootfs-tree/` into the final normal-image target during fakeroot and also imports mutable host-provided `root/.ssh/authorized_keys` data from `board/rootfs-overlay/` when present
 - Buildroot package selection includes Dropbear, Bash, Make, Git, Python 3, and other core tools needed in the guest
-- the seeded stage0 boot helpers now include real non-BusyBox providers for storage, early networking, hostname, core service orchestration, the latent module-loading path, the current runtime-only cleanup batch, and the final RNG handoff: the defconfig enables the util-linux basic binary set plus `mount`/`mountpoint`, enables seeded `debianutils`, `iproute2`, `iputils`, `kmod`, `net-tools`, `start-stop-daemon`, `sysklogd`, `ifupdown`, ISC `dhclient`, `dcron`, `cpio`, `bc`, `tree`, `time`, `lsof`, `procps-ng`, and a vendored standalone `seedrng` package that `urandom-scripts` selects automatically, while `sysvinit` owns the normal-root `/sbin/killall5` and `/sbin/pidof` paths and Buildroot's `urandom-scripts` hook still consumes the seeded `/usr/sbin/seedrng` helper during early boot; the normal defconfig no longer selects `BR2_PACKAGE_BUSYBOX`, and `board/post-build.sh` strips any stale `/bin/busybox`, legacy BusyBox links, and the unused normal-root `/linuxrc` symlink from incremental outputs while still seeding `/sbin/getty -> /sbin/agetty` and scrubbing `/bin/ash` from `/etc/shells`; the recovery image now uses the repo-owned `board/recovery-rootfs-tree/`, `board/recovery-init.c`, and `board/recovery-toolbox.c` rescue substrate assembled by `board/recovery-post-fakeroot.sh`
+- the seeded stage0 boot helpers now include real non-BusyBox providers for storage, early networking, hostname, core service orchestration, the latent module-loading path, the current runtime-only cleanup batch, and the final RNG handoff: the defconfig enables the util-linux basic binary set plus `mount`/`mountpoint`, enables seeded `debianutils`, `iproute2`, `iputils`, `kmod`, `net-tools`, `start-stop-daemon`, `sysklogd`, `ifupdown`, ISC `dhclient`, `dcron`, `cpio`, `bc`, `tree`, `time`, `lsof`, `procps-ng`, and a vendored standalone `seedrng` package that `urandom-scripts` selects automatically, while `sysvinit` owns the normal-root `/sbin/killall5` and `/sbin/pidof` paths and Buildroot's `urandom-scripts` hook still consumes the seeded `/usr/sbin/seedrng` helper during early boot; the normal defconfig no longer selects `BR2_PACKAGE_BUSYBOX`, and `board/normal-post-fakeroot.sh` now explicitly installs the checked-in normal seed tree, imports mutable host-provided SSH authorization data, strips any stale `/bin/busybox`, legacy BusyBox links, and the unused normal-root `/linuxrc` symlink from the final target, and still seeds `/sbin/getty -> /sbin/agetty` plus scrubs `/bin/ash` from `/etc/shells`; the recovery image now uses the repo-owned `board/recovery-rootfs-tree/`, `board/recovery-init.c`, and `board/recovery-toolbox.c` rescue substrate assembled by `board/recovery-post-fakeroot.sh`
 
 The recovery defconfig is `configs/slopos_aarch64_virt_recovery_defconfig`.
 
@@ -323,6 +431,7 @@ For the normal phase-2 ext4 image:
 - QEMU boots the kernel directly with `root=/dev/vda`, so `/linuxrc` is intentionally absent
 - `/bin/busybox` is intentionally absent from the seed image
 - early-boot paths are seeded from direct Buildroot providers rather than BusyBox applets
+- the final ext4 tree is still mostly Buildroot package output plus the checked-in repo-owned normal seed tree and `board/normal-post-fakeroot.sh` normalization; unlike recovery, it is not yet assembled as a wholly repo-owned final userspace tree
 - some legacy paths remain as intentional compatibility links to those non-BusyBox providers, such as `/bin/sh`, `/sbin/getty`, `/sbin/{ifup,ifdown}`, and `/sbin/{insmod,lsmod,modprobe,rmmod}`
 - later boot hooks may repoint selected paths like `/bin/sh`, `/sbin/getty`, and parts of the userland surface to managed `/usr/local` providers, but the seeded image itself must already boot cleanly without BusyBox
 
@@ -345,10 +454,14 @@ cd linux-vm && ./scripts/validate-busyboxless.sh
 ```
 
 That validator checks the built normal `rootfs.ext4` and recovery
-`rootfs.cpio.gz` artifacts for BusyBox leakage, verifies the expected minimal
-recovery archive surface, boots an isolated copy of the normal image with fresh
-temporary root/data disks, and then boots recovery through a pseudo-terminal to
-prove the custom prompt, `sh -c` path, repo-owned command surface, and clean
+`rootfs.cpio.gz` artifacts for BusyBox leakage, verifies that
+`rootfs/bootstrap-manifest.toml` still matches the checked-in
+`board/normal-rootfs-tree/` and the now-narrow mutable `board/rootfs-overlay/`
+surface, checks that the normal artifact still contains the declared repo-owned
+seed paths without shipping managed `/usr/local` payloads, boots an isolated
+copy of the normal image with fresh temporary root/data disks to verify the
+same ownership boundary live, and then boots recovery through a pseudo-terminal
+to prove the custom prompt, `sh -c` path, repo-owned command surface, and clean
 shutdown still work. Use `--artifacts-only` or `--live-only` when you only want
 one half of the proof.
 
@@ -473,9 +586,24 @@ Each successful `sloppkg build` now emits:
 
 - `manifest.json`
 - `pkg-info.toml`
+- a per-build log under `state/logs/builds/<transaction>-<package>.log`
 - a cached archive in `state/packages/<name>/*.sloppkg.tar.zst`
 - a refreshed binary repo metadata file at `state/packages/repo.toml`
 - a refreshed binary repo index at `state/packages/repodata/index.sqlite.zst`
+
+The CLI now also reports that log path directly in the build summary, and failed
+build transactions write a JSON record under `state/db/transactions/` with the
+failure `status`, the captured `log_path`, and the surfaced error string. That
+gives the later guest-native rebuild workflow a stable place to look for build
+forensics instead of relying on transient terminal output.
+
+Install/upgrade/remove transactions now use the same directory for durable
+status records too. A successful package commit is no longer marked complete
+until the post-success maintenance pass finishes; if runtime-hook refresh,
+repo-publish, or cleanup fails after package contents were already applied, the
+transaction record is left in `status = "maintenance-failed"` with a
+`maintenance.error` field instead of pretending the transaction completed
+cleanly.
 
 You can also regenerate the binary repo metadata explicitly with:
 
@@ -682,9 +810,11 @@ The export step is important: the raw local `packages/` tree is a development re
 
 ```bash
 cd linux-vm && ./scripts/sloppkg.sh repo publish --name workspace --channel stable
+cd linux-vm && ./scripts/sloppkg.sh repo publish --name workspace-candidate --channel candidate --no-remember
+cd linux-vm && ./scripts/sloppkg.sh repo promote --source-name workspace-candidate --source-channel candidate --target-name workspace --target-channel stable
 ```
 
-That writes immutable exported revisions under `state/published/<repo>/revisions/<channel>/`, updates `state/published/<repo>/live` to the newest revision, and records the publish settings so later successful `install` and `upgrade` runs can republish automatically.
+That writes immutable exported revisions under `state/published/<repo>/revisions/<channel>/`, updates `state/published/<repo>/live` to the newest revision, and records the publish settings so later successful `install` and `upgrade` runs can republish automatically. Candidate publishes should use a separate repo name such as `workspace-candidate`, not just a different channel, because the live served view is tracked per repo. `--no-remember` keeps those candidate publishes out of the automatic post-transaction republish path, and `repo promote` copies an exact already-published candidate revision into the stable repo view instead of re-exporting from whatever the recipe tree contains later.
 
 For the running guest, the host helper:
 
@@ -693,6 +823,12 @@ slopos-publish-http-repo
 ```
 
 publishes the guest recipe tree at `/Volumes/slopos-data/packages/` through `sloppkg repo publish`, serves `state/published/workspace/live` on the guest loopback `python3 -m http.server` at `127.0.0.1:18083`, records the unified repo in the guest config, and runs `sloppkg update` so the configured snapshot stays current.
+
+It also now supports:
+
+- `--no-remember` for candidate publishes that must not become auto-republish state
+- `--skip-repo-config` for one-off served views used only during rebuild validation
+- `--serve-only` to expose an already-promoted live root without exporting it again
 
 From the host, the thin convenience wrapper:
 
@@ -706,7 +842,7 @@ just stages the checked-in guest helper into the VM and invokes it over SSH.
 
 The guest runtime is now meant to be package-managed too.
 
-The checked-in recipe `packages/sloppkg/0.1.0-1/package.toml` installs the managed binary at `/Volumes/slopos-data/opt/sloppkg/current/bin/sloppkg`, and `board/rootfs-overlay/etc/init.d/S16persistent-sloppkg` exposes it back at `/usr/local/bin/sloppkg` on each boot. That keeps `sloppkg` available after a root reset as long as the persistent disk survives.
+The checked-in recipe `packages/sloppkg/0.1.0-1/package.toml` installs the managed binary at `/Volumes/slopos-data/opt/sloppkg/current/bin/sloppkg`, and `board/normal-rootfs-tree/etc/init.d/S16persistent-sloppkg` exposes it back at `/usr/local/bin/sloppkg` on each boot. That keeps `sloppkg` available after a root reset as long as the persistent disk survives.
 
 The host helper:
 
@@ -736,6 +872,8 @@ sloppkg upgrade --root /
 with no `--recipe-root` override needed during ordinary operation, as long as the configured unified repo has been refreshed from the guest recipe tree.
 
 Once `repo publish` has been run at least once for that guest repo, successful `sloppkg install ... --root /` and `sloppkg upgrade --root /` runs also republish the served repo automatically and run `cleanup` maintenance afterward. Those successful root transactions now rerun the boot-time reconnection hooks that package upgrades can affect: `S14persistent-dropbear`, `S15local-lib-links`, `S16persistent-sloppkg`, `S17persistent-getty`, `S19persistent-sh`, and `S20managed-userland-links`. That means persistent Dropbear exposure, the `/usr/local/bin/sloppkg` handoff, the managed `agetty` handoff, the managed `dash` handoff, the live `/usr/lib64` linker view, and the selected non-boot-critical userland path handoffs and stale-link cleanup are refreshed immediately after a successful transaction instead of waiting for the next reboot.
+
+For candidate rebuild validation, the package manager also now supports `install`, `upgrade`, and `remove` with `--skip-publish-maintenance`. That still refreshes the runtime reconnection hooks, but it suppresses remembered repo republish so local recipe-root testing cannot accidentally mutate the stable served repo.
 
 ### Ordinary upgrades vs bootstrap events
 
@@ -786,13 +924,239 @@ That flow was validated after a fresh `RESET_ROOT_DISK=1` reseed against a rebui
 
 ```bash
 slopos-sync-world --install-target selfhost-world
+
+If no world packages are recorded yet, `slopos-sync-world` now treats that
+empty-state case as a bootstrap event automatically and installs the canonical
+target `selfhost-world` by default before returning to ordinary `upgrade`
+behavior on later runs.
 ```
+
+For the next managed-world rebuild phase, the normal seed now also carries a
+guest-side readiness probe:
+
+```bash
+slopos-validate-rebuild-readiness --package hello-stage --world-target selfhost-world
+```
+
+That helper checks the persistent mountpoint, recipe-root presence, managed
+`sloppkg`, the final selfhost compiler wrappers, writable `state_root`,
+distfiles, and build-log directories, then optionally runs `sloppkg resolve`
+plus `sloppkg fetch` for the requested targets. The intended build-log location
+for rebuild work is `state/logs/builds/`.
+
+The first guest-side rebuild workflow now lives in:
+
+```bash
+slopos-validate-managed-world --world-target selfhost-world
+slopos-rebuild-world --package hello-stage
+slopos-rebuild-world --package hello-stage --install-target hello-stage
+slopos-rebuild-world --slice selfhost-world --prefetch-only
+slopos-rebuild-world --package openssl --with-installed-dependents
+slopos-rebuild-world --package openssl --with-installed-dependents --force-rebuild
+slopos-rebuild-world --slice selfhost-devel
+slopos-promote-rebuild --source-name workspace-candidate --source-channel candidate --target-name workspace --target-channel stable
+cd linux-vm && ./scripts/validate-guest-world.sh --world-target selfhost-world
+cd linux-vm && ./scripts/rebuild-guest-world.sh --package hello-stage
+cd linux-vm && ./scripts/promote-guest-world.sh
+```
+
+`slopos-rebuild-world` runs the readiness probe, ensures one or more selected
+packages are ready in the guest package cache, publishes a candidate unified
+repo snapshot, and then either installs explicit targets or reuses the normal
+world-convergence path through `slopos-sync-world`. During that convergence it
+loads packages directly from `--recipe-root /Volumes/slopos-data/packages` and
+passes `--skip-publish-maintenance`, so the rebuilt guest is tested against the
+current candidate recipe tree without mutating the remembered stable served repo.
+By default it first checks `sloppkg cache-status` and reuses an existing package
+archive when the current recipe hash is already packaged; `--force-rebuild`
+bypasses that and restages every selected package. `--prefetch-only` exposes the
+readiness step as a supported workflow for larger waves: resolve the expanded
+target set, fetch or verify their distfiles up front, and stop before any
+publish/install work. That keeps rebuild logic guest-resident while the host
+wrapper remains only an SSH transport convenience. The helper now also
+serializes itself with `state/locks/rebuild-world.lock` and writes a workflow log
+under `state/logs/rebuilds/`, so later publish/install failures still leave a
+durable phase trace. Successful install/upgrade flows now also run
+`slopos-validate-managed-world` before they report success unless
+`--no-validate` is requested explicitly, and successful runs print the explicit
+`repo promote` command needed to move the candidate revision into the stable
+repo view.
+
+`slopos-validate-managed-world` is the canonical guest-side smoke suite for the
+current managed world. It validates the expected managed command resolution,
+rechecks the seeded shell/init scripts with `dash -n`, exercises gzip/tar and
+representative coreutils paths, runs a root-only util-linux bind-mount round
+trip, compiles and runs a tiny C program through the current `gcc`/`make`
+toolchain, checks `file`, `perl`, `prove`, and `pod2man`, republishes the guest
+HTTP repo, and then validates the managed networking surface with `ip`, `ss`,
+`ping`, `traceroute`, `nc`, `wget`, and `curl`. Validation logs land under
+`state/logs/validations/`. The thin host wrapper `scripts/validate-guest-world.sh`
+stages that checked-in helper and runs it over SSH.
+
+The supported operator story is now explicit:
+
+- **leaf rebuilds** use `--package` and optionally `--install-target`; they keep
+  the simple batch behavior and are the right tool for rebuilding one package
+  or a small hand-picked set
+- **coordinated rebuild waves** use `--with-installed-dependents` and/or
+  `--slice`; those modes expand the affected package set, order it through
+  `sloppkg resolve`, and rerun `slopos-sync-world --skip-publish --recipe-root ... --skip-publish-maintenance`
+  after each rebuilt package so later builds see the refreshed managed root
+- the current named slice targets are the meta-packages `selfhost-base`,
+  `selfhost-devel`, `selfhost-network`, `selfhost-toolchain`, and
+  `selfhost-world`
+- **promotion** is a separate explicit step: candidate publishes are not
+  remembered and do not rewrite the stable repo until `slopos-promote-rebuild`
+  or `sloppkg repo promote` is run
+
+For inspection, `sloppkg dependents --json --transitive <package>` now reports
+the installed reverse-dependency set that coordinated rebuild waves expand from,
+and `sloppkg cache-status --json <package>` reports whether the currently
+selected recipe already has a matching cached package archive.
+
+### Guest-native kernel artifacts
+
+The next boundary below full guest-native image assembly is now a supported
+kernel-artifact workflow:
+
+```bash
+slopos-build-kernel-artifacts
+cd linux-vm && ./scripts/build-guest-kernel-artifacts.sh
+cd linux-vm && ./scripts/promote-guest-kernel-candidate.sh
+cd linux-vm && KERNEL_IMAGE=artifacts/guest-kernel-candidate/current/Image ./scripts/run-phase2.sh
+cd linux-vm && ./scripts/validate-guest-combined-boot-candidate.sh
+```
+
+That workflow still keeps the default boot path conservative. The authoritative
+normal boot kernel remains `artifacts/buildroot-output/images/Image`, and the
+recovery flow still comes from `artifacts/buildroot-recovery-output/`, but the
+latest guest-built kernel can now be copied into a host-side candidate path for
+explicit opt-in testing with `KERNEL_IMAGE=...`.
+
+Instead, `scripts/build-guest-kernel-artifacts.sh` parses the current normal
+Buildroot defconfig to discover the kernel version, checked-in kernel config,
+and board patch directory, stages those exact inputs plus the matching
+`buildroot-src/dl/linux/linux-<version>.tar.*` archive into
+`/Volumes/slopos-data/kernel/input/current`, and then invokes the checked-in
+guest helper `/usr/sbin/slopos-build-kernel-artifacts`.
+
+The guest helper builds `Image` and modules natively with the current managed
+toolchain, validates that the built `Image` exists and that module installation
+produced a non-empty `lib/modules/<kernelrelease>/` tree, records the staged
+input files alongside the output, writes a manifest plus build log, and updates
+`/Volumes/slopos-data/kernel/artifacts/current` to the latest successful build.
+
+`scripts/promote-guest-kernel-candidate.sh` then copies the current guest
+artifact's `Image`, `System.map`, resolved `linux.config`, and manifest back to
+`artifacts/guest-kernel-candidate/<artifact>/`, records host-side provenance,
+and refreshes `artifacts/guest-kernel-candidate/current` for later boot
+handoff testing.
+
+The resulting persistent layout is:
+
+- `input/current/` for the staged Buildroot-derived kernel inputs
+- `artifacts/<kernelrelease>-<timestamp>/` for a versioned validated output set
+- `artifacts/current` as the latest successful artifact pointer
+- `logs/` for durable guest-native kernel build logs
+
+This keeps kernel config and patch ownership aligned with the existing normal
+Buildroot defconfig while making the actual compile step guest-native. The
+default normal boot kernel remains Buildroot-owned, but there is now a
+host-visible candidate handoff path for later explicit boot validation.
+
+### Guest-native rootfs artifacts
+
+There is now also a first guest-native rootfs/image assembly path:
+
+```bash
+slopos-build-rootfs-artifacts
+cd linux-vm && ./scripts/build-guest-rootfs-artifacts.sh
+cd linux-vm && ./scripts/audit-guest-ext4-sealing.sh
+cd linux-vm && ./scripts/validate-guest-mke2fs-d-support.sh
+cd linux-vm && ./scripts/validate-guest-rootfs-artifacts.sh
+cd linux-vm && ./scripts/validate-guest-rootfs-boot-candidate.sh
+cd linux-vm && ./scripts/validate-guest-combined-boot-candidate.sh
+cd linux-vm && RESET_ROOT_DISK=1 ROOTFS_SOURCE_IMAGE=artifacts/guest-rootfs-candidate/current/rootfs.ext4 ./scripts/run-phase2.sh
+```
+
+This path still keeps the current ownership boundary honest. The normal bootable
+rootfs surface is still mostly Buildroot-owned, so the host wrapper first
+extracts the current Buildroot `rootfs.ext4` into a staged plain tar archive
+and ships that base tree into `/Volumes/slopos-data/rootfs/input/current` alongside the
+checked-in `board/normal-post-fakeroot.sh`, `board/normal-rootfs-tree/`,
+`board/rootfs-overlay/`, the current normal defconfig, and the bootstrap
+manifest.
+
+The guest helper `/usr/sbin/slopos-build-rootfs-artifacts` then reruns the same
+normal-image assembly hook in-guest, normalizes the extracted base tree back to
+`root:root` ownership so host UID/GID values do not leak into the rebuilt
+image, clears transient `run/` and `tmp/` contents, archives the assembled tree
+as `rootfs-tree.tar`, and on the current rebuilt seed image now seals
+`rootfs.ext4` directly in-guest with `mke2fs -t ext4 -d` using the defconfig’s
+label and size. The tar staging path stays intentionally uncompressed so the
+seeded guest-native builder does not depend on a seeded `gzip` binary or Python
+compression stdlib modules. The host/Lima wrapper still retains the old sealing
+path as a compatibility fallback for older guests that have not yet been
+reseeded onto that new image.
+
+The checked-in ext4 audit path now makes the transition boundary concrete:
+
+- the rebuilt seed now includes `e2fsprogs`, so the intended guest-native path
+  is `mke2fs -d`, not loop-mounted image population
+- managed util-linux `losetup` and `mount` are already present in the guest, but
+  the checked-in kernel config still does not enable `CONFIG_BLK_DEV_LOOP`
+- older guests that have not yet been reseeded still show the old blocker set:
+  BusyBox `mke2fs` without `-d`, no `/dev/loop*` nodes, `modprobe loop`
+  failing, and `mount -o loop` failing
+
+That transition is now proven end to end:
+
+1. reseed onto the rebuilt image that carries `e2fsprogs`
+2. run `scripts/validate-guest-mke2fs-d-support.sh` to prove the temporary
+   guest audit reports `guest_native_ext4_ready: yes`
+3. confirm `scripts/build-guest-rootfs-artifacts.sh` records
+   `seal_method = "guest-mke2fs-d"` without needing the host fallback
+4. keep kernel loop support only as a separate later option if the project
+   still wants a second in-guest image-population strategy beyond `mke2fs -d`
+
+The validated guest-built image is still a host-side handoff artifact first.
+`scripts/validate-guest-rootfs-artifacts.sh` copies the latest guest-built image
+back to the host, runs the existing BusyBox-less/isolated-boot checks against
+it, and promotes the validated result into
+`artifacts/guest-rootfs-candidate/current/`. A host boot can then opt into that
+candidate explicitly with
+`ROOTFS_SOURCE_IMAGE=artifacts/guest-rootfs-candidate/current/rootfs.ext4` plus
+`RESET_ROOT_DISK=1`. `scripts/validate-guest-rootfs-boot-candidate.sh` is the
+targeted proof for that explicit host handoff path: it boots a temporary root
+disk through `run-phase2.sh`, verifies that the reseed came from the candidate
+image, and then reruns the live normal-seed contract checks over SSH.
+
+`scripts/validate-guest-combined-boot-candidate.sh` extends that proof to the
+full combined handoff path. It boots a temporary VM through `run-phase2.sh`
+with both `ROOTFS_SOURCE_IMAGE=artifacts/guest-rootfs-candidate/current/rootfs.ext4`
+and `KERNEL_IMAGE=artifacts/guest-kernel-candidate/current/Image`, verifies the
+temporary root disk reseed and selected kernel path from the boot log, checks
+that `uname -r` matches the guest-kernel candidate manifest, and then reruns
+the live normal-seed contract over SSH.
+
+Once that explicit combined handoff is trusted, `scripts/promote-guest-boot-default.sh`
+can copy the current host-side candidates into
+`artifacts/guest-boot-promoted/current/` as a paired default boot source without
+overwriting `artifacts/buildroot-output/images/`. From that point on,
+`ensure-root-disk.sh` and `run-phase2.sh` will use the promoted `rootfs.ext4`
+and `Image` by default whenever the caller does not provide explicit
+`ROOTFS_SOURCE_IMAGE` or `KERNEL_IMAGE` overrides. The companion
+`scripts/validate-promoted-boot-default.sh` boots a temporary VM with no
+explicit boot overrides and proves from the boot log that the promoted default
+pair was selected. `scripts/promote-guest-boot-default.sh --clear` removes the
+current promoted symlink and returns default selection to the Buildroot rootfs
+and kernel artifacts.
 
 ## System ownership boundary
 
 The current contract is:
 
-- Buildroot plus the rootfs overlay own the **seed image**
+- Buildroot target output plus the repo-owned seed assembly own the **seed image**
 - `sloppkg` owns the **managed world**
 - `/Volumes/slopos-data` owns the durable **persistent data/toolchain state**
 
@@ -805,9 +1169,28 @@ The seed image is still responsible for the things that must work before the man
 - the kernel, seeded ext4 rootfs, and recovery initramfs
 - init, device bring-up, and first-boot shell/network behavior
 - HTTPS bootstrap transport (`wget`, Python `_ssl`, CA certificates)
-- the boot glue in `board/rootfs-overlay/etc/init.d/S11...S16`
+- the boot glue in `board/normal-rootfs-tree/etc/init.d/S11...S16`
 
 In other words: Buildroot still owns **bootability and reconnection**, not the long-term ownership of every userspace tool.
+
+#### Current normal seed assembly boundary
+
+The normal ext4 seed image is the main unresolved ownership boundary heading into
+Phase 12.
+
+Today, the built `rootfs.ext4` shows that:
+
+- Buildroot still emits the directory skeleton and most of `/bin`, `/sbin`, `/usr`, `/lib*`, and baseline `/etc`
+- the checked-in normal seed tree currently contributes `/init`, `/etc/inittab`, `/etc/profile.d/00-managed-path.sh`, `/etc/resolv.conf.static`, `/usr/sbin/slopos-publish-http-repo`, `/usr/sbin/slopos-rebuild-world`, `/usr/sbin/slopos-sync-world`, `/usr/sbin/slopos-validate-managed-world`, `/usr/sbin/slopos-validate-rebuild-readiness`, and the `S11`-`S20` boot glue
+- `board/normal-post-fakeroot.sh` is now the explicit final-assembly hook for the normal image: it installs the checked-in seed tree, imports mutable `/root/.ssh/authorized_keys` data when present, removes stale BusyBox leftovers, removes the unused `/linuxrc` path, rewires `/bin/sh -> dash`, `/sbin/getty -> /sbin/agetty`, `/sbin/{ifup,ifdown} -> /usr/sbin/*`, and prunes a few stale init hooks when direct providers are present
+- `board/rootfs-overlay/root/.ssh/authorized_keys` is now the only mutable host-injected build input under `board/rootfs-overlay/`; the checked-in static seed files live under `board/normal-rootfs-tree/` instead
+- a fresh seed image currently does **not** ship a populated `/usr/local`; managed `/usr/local` ownership is reintroduced later from persistent state by `sloppkg` and the boot-time reconnection hooks
+
+That means the normal seed image is already BusyBox-free and boot-stable, but it
+is still fundamentally a Buildroot-produced root filesystem with repo-owned
+boot glue layered onto it. Phase 12 starts from making that boundary explicit so
+the normal image can eventually follow recovery's lead and become a
+deliberately repo-owned final tree too.
 
 ### Managed world
 
@@ -839,7 +1222,8 @@ When `RESET_ROOT_DISK=1` is used, this data disk is expected to survive intact. 
 
 ### Minimum recoverable base world
 
-The current recoverable package-manager targets are:
+The current recoverable package-manager targets are the named `selfhost-*`
+profiles:
 
 - `selfhost-base`
 - `selfhost-network`
@@ -847,7 +1231,54 @@ The current recoverable package-manager targets are:
 - `selfhost-toolchain`
 - `selfhost-world`
 
-`selfhost-base` is the minimum named managed runtime profile; `selfhost-world` is the canonical full guest profile. The validated reseed replay now restores the full `selfhost-world` state from persistent guest data without live guest surgery.
+`selfhost-base` is the minimum named managed runtime profile; `selfhost-world`
+is the canonical full guest profile and the default bootstrap target when a new
+package-manager state has no recorded world entries yet. The validated reseed
+replay now restores the full `selfhost-world` state from persistent guest data
+without live guest surgery.
+
+### Next handoff toward guest-native rebuilds
+
+Phase 12 makes the seed boundary explicit, but it does **not** mean the guest
+can already rebuild the whole bootable machine from inside itself.
+
+The current host-owned/buildroot-owned responsibilities are still:
+
+- `scripts/build-phase2-lima.sh` and `scripts/build-phase2-linux.sh` driving the
+  Buildroot build, kernel compile, and seeded ext4 image production
+- `scripts/build-recovery-lima.sh` and the recovery Buildroot flow producing the
+  recovery kernel and initramfs artifacts
+- `scripts/ensure-root-disk.sh`, `scripts/ensure-persistent-disk.sh`, and
+  `scripts/run-phase2.sh` seeding disk images and launching QEMU
+- `configs/slopos_aarch64_virt_defconfig` and
+  `configs/slopos_aarch64_virt_recovery_defconfig` remaining the authority for
+  the seeded kernel, rootfs package set, and recovery package set
+- `configs/host-guest.env` remaining the authority for host/QEMU/Lima settings
+
+The smallest realistic next phase is therefore **not** "guest-native ext4 image
+production." It is:
+
+1. keep using the current seed image and recovery image as the bootable host
+   substrate
+2. prove that the guest can rebuild the managed `sloppkg` world from source
+   using the already-packaged selfhost toolchain and the current `/usr/local`
+   ownership model
+3. add a guest-native kernel build path that emits a testable kernel artifact
+   into persistent state without yet replacing the host-built boot kernel
+4. only then start designing guest-native rootfs/image assembly, once the
+   remaining Buildroot-owned `/bin`, `/sbin`, `/usr`, and `/lib*` boundary is
+   intentionally retired rather than implicitly bypassed
+
+The main blockers for promising full guest-native ext4 production today are:
+
+- there is no guest-native image builder or ext4 assembly flow yet
+- there is no package-managed kernel build/install path yet
+- kernel/modules/initramfs coupling is still owned by the Buildroot build
+- the normal seed still inherits most of `/bin`, `/sbin`, `/usr`, `/lib*`, and
+  base `/etc` from Buildroot rather than from a guest-native package closure
+- persistent payload cutovers such as `sloppkg` and Dropbear still rely on the
+  current boot-glue handoff model and need an explicit atomic replacement story
+  before they become outputs of a larger guest-native image build pipeline
 
 ## Runtime linker model
 
@@ -855,7 +1286,7 @@ The current runtime ABI contract is intentionally simple:
 
 - managed root-owned libraries still install under `/usr/local/lib` and `/usr/local/lib64`
 - the guest dynamic linker still searches `/usr/lib64`, not `/usr/local/lib`
-- `board/rootfs-overlay/etc/init.d/S15local-lib-links` bridges that gap by mirroring shared-library names from `/usr/local/lib*` into `/usr/lib64`
+- `board/normal-rootfs-tree/etc/init.d/S15local-lib-links` bridges that gap by mirroring shared-library names from `/usr/local/lib*` into `/usr/lib64`
 
 This is now treated as a **current contract**, not an accidental workaround.
 

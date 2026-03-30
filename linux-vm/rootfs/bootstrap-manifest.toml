@@ -11,7 +11,7 @@ notes = [
 ]
 
 [seed_image]
-owner = "buildroot-plus-rootfs-overlay"
+owner = "buildroot-target-output-plus-repo-seed-tree"
 artifacts = [
   "kernel",
   "seed-rootfs",
@@ -33,6 +33,49 @@ immutable_services = [
 notes = [
   "The seed image may ship baseline copies of tools that are later replaced or shadowed by persistent managed payloads.",
   "Recovery stays intentionally tiny and independent from the managed root world.",
+  "The current normal ext4 seed is not a repo-owned final tree yet: Buildroot still emits most of /bin, /sbin, /usr, /lib*, and base /etc, while the checked-in normal seed tree owns /init, /etc/inittab, S11-S20 boot glue, managed-path/profile glue, and the guest helper wrappers.",
+  "board/normal-post-fakeroot.sh now explicitly installs the checked-in normal seed tree and mutable host-injected SSH authorization data into the final target tree, then normalizes BusyBox-free compatibility links such as /bin/sh, /sbin/getty, and /sbin/{ifup,ifdown}.",
+  "A fresh seed image currently does not carry a prepopulated /usr/local tree; managed /usr/local ownership is restored later from persistent state and sloppkg-managed payloads.",
+  "board/rootfs-overlay is now reserved for mutable host-provided seed inputs such as root/.ssh/authorized_keys rather than for the checked-in static boot glue.",
+]
+
+[normal_seed_tree]
+source = "board/normal-rootfs-tree"
+assembly_hook = "board/normal-post-fakeroot.sh"
+mutable_input = "board/rootfs-overlay"
+notes = [
+  "board/normal-rootfs-tree is the checked-in static seed tree for the normal image.",
+  "board/normal-post-fakeroot.sh installs that tree into the final fakeroot target explicitly instead of relying on Buildroot's rootfs overlay copy step for the static repo-owned files.",
+  "board/rootfs-overlay remains only a mutable host-input area because prepare-guest-ssh.sh injects root/.ssh/authorized_keys there before builds.",
+]
+repo_owned_paths = [
+  "/init",
+  "/etc/default/dropbear",
+  "/etc/inittab",
+  "/etc/profile.d/00-managed-path.sh",
+  "/etc/resolv.conf.static",
+  "/etc/init.d/S11persistent-disk",
+  "/etc/init.d/S12ssh-setup",
+  "/etc/init.d/S13toolchain-links",
+  "/etc/init.d/S14persistent-dropbear",
+  "/etc/init.d/S15local-lib-links",
+  "/etc/init.d/S16persistent-sloppkg",
+  "/etc/init.d/S17persistent-getty",
+  "/etc/init.d/S18devtmpfs-policy",
+  "/etc/init.d/S19persistent-sh",
+  "/etc/init.d/S20managed-userland-links",
+  "/usr/sbin/slopos-build-kernel-artifacts",
+  "/usr/sbin/slopos-build-rootfs-artifacts",
+  "/usr/sbin/slopos-audit-ext4-sealing-prereqs",
+  "/usr/sbin/slopos-publish-http-repo",
+  "/usr/sbin/slopos-promote-rebuild",
+  "/usr/sbin/slopos-rebuild-world",
+  "/usr/sbin/slopos-sync-world",
+  "/usr/sbin/slopos-validate-managed-world",
+  "/usr/sbin/slopos-validate-rebuild-readiness",
+]
+mutable_overlay_paths = [
+  "/root/.ssh/authorized_keys",
 ]
 
 [managed_world]
@@ -45,33 +88,28 @@ persistent_prefixes = [
   "/Volumes/slopos-data/opt/dropbear/current",
   "/Volumes/slopos-data/opt/sloppkg/current",
 ]
-minimum_recoverable_world = [
-  "sloppkg",
+recoverable_profiles = [
+  "selfhost-base",
+  "selfhost-network",
+  "selfhost-devel",
   "selfhost-toolchain",
-  "dropbear",
-  "zlib",
-  "xz",
-  "pkgconf",
-  "libffi",
-  "openssl",
-  "expat",
-  "ncurses",
-  "readline",
-  "sqlite",
-  "zstd",
-  "curl",
+  "selfhost-world",
 ]
+minimum_runtime_profile = "selfhost-base"
+canonical_bootstrap_target = "selfhost-world"
 notes = [
   "For now, root-owned managed files live under /usr/local rather than /usr.",
   "The current runtime ABI contract is that managed shared libraries remain in /usr/local/lib* and S15local-lib-links re-exposes them under /usr/lib64 for the system dynamic linker.",
   "Persistent service payloads may live under /Volumes/slopos-data/opt/... and be surfaced back into the root filesystem by boot glue.",
-  "The minimum recoverable world is the package set that must be reinstallable after RESET_ROOT_DISK=1 without live guest surgery.",
+  "The selfhost-* meta packages define the recoverable managed shape after RESET_ROOT_DISK=1, with selfhost-base as the minimum named runtime profile and selfhost-world as the canonical full-system bootstrap target for an empty state root.",
 ]
 
 [persistent_state]
 owner = "persistent-data-disk"
 mountpoint = "/Volumes/slopos-data"
 paths = [
+  "/Volumes/slopos-data/kernel",
+  "/Volumes/slopos-data/rootfs",
   "/Volumes/slopos-data/packages",
   "/Volumes/slopos-data/pkg",
   "/Volumes/slopos-data/toolchain",
@@ -82,6 +120,47 @@ paths = [
 notes = [
   "This disk is the durable handoff between root reseeds: it holds the recipe repo, package-manager state, cached archives, persistent service payloads, ssh state, and selfhost toolchain.",
   "Normal root resets are expected to preserve this disk intact.",
+]
+
+[kernel_artifacts]
+owner = "guest-native build workflow"
+input_contract = [
+  "configs/slopos_aarch64_virt_defconfig defines the kernel version and points at the checked-in kernel config plus the Buildroot board patch directory.",
+  "scripts/build-guest-kernel-artifacts.sh stages that defconfig, buildroot-src/board/qemu/aarch64-virt/linux.config, buildroot-src/board/qemu/patches/linux, and the matching linux tarball into /Volumes/slopos-data/kernel/input/current before invoking the guest helper.",
+  "scripts/promote-guest-kernel-candidate.sh can then copy the current guest artifact's Image, manifest, and related metadata back into artifacts/guest-kernel-candidate/current on the host for explicit KERNEL_IMAGE=... boot selection.",
+]
+persistent_root = "/Volumes/slopos-data/kernel"
+artifacts_root = "/Volumes/slopos-data/kernel/artifacts"
+notes = [
+  "Guest-built kernel artifacts are validation outputs only for now; the authoritative normal boot kernel still comes from artifacts/buildroot-output/images/Image.",
+  "The guest helper writes a versioned artifact directory plus an artifacts/current symlink, stores Image and modules together, records the staged input config files, and emits a manifest plus build log for later inspection.",
+  "The new host-side guest-kernel candidate path is opt-in only: run-phase2.sh can boot from KERNEL_IMAGE=artifacts/guest-kernel-candidate/current/Image, but the default boot kernel does not change unless the caller requests it explicitly.",
+]
+
+[rootfs_artifacts]
+owner = "guest-native build workflow"
+input_contract = [
+  "The host stages a plain tar archive of the current Buildroot normal rootfs tree, plus board/normal-post-fakeroot.sh, board/normal-rootfs-tree, board/rootfs-overlay, configs/slopos_aarch64_virt_defconfig, and this bootstrap manifest under /Volumes/slopos-data/rootfs/input/current.",
+  "The guest helper extracts that staged base tree, normalizes it back to root:root ownership, reruns the checked-in normal-post-fakeroot assembly logic, clears transient run/tmp state, and archives the assembled result as rootfs-tree.tar in the versioned artifact directory.",
+  "On the rebuilt seed image that now includes e2fsprogs, the guest helper seals rootfs.ext4 directly from that assembled tree with mke2fs -t ext4 -d and records the guest seal method in the manifest.",
+  "The host/Lima wrapper keeps the older seal path only as a compatibility fallback for guests that have not yet been reseeded onto the e2fsprogs-capable image.",
+]
+persistent_root = "/Volumes/slopos-data/rootfs"
+artifacts_root = "/Volumes/slopos-data/rootfs/artifacts"
+notes = [
+  "Guest-built rootfs images are validation artifacts only for now; the authoritative normal boot rootfs still comes from artifacts/buildroot-output/images/rootfs.ext4.",
+  "The intended current path is now fully guest-native ext4 sealing through mke2fs -d; host/Lima sealing remains only as a compatibility bridge for older guests until they are reseeded.",
+  "scripts/audit-guest-ext4-sealing.sh and /usr/sbin/slopos-audit-ext4-sealing-prereqs are the checked-in audit path for confirming whether a booted guest has crossed that boundary.",
+  "The current guest-native assembly contract deliberately keeps the Buildroot-owned base tree as an input because most of the normal root surface still belongs to stage0.",
+]
+
+[boot_promotion]
+owner = "host-side promotion flow"
+persistent_root = "artifacts/guest-boot-promoted"
+notes = [
+  "scripts/promote-guest-boot-default.sh copies the current host-side guest rootfs and kernel candidates into artifacts/guest-boot-promoted/current without overwriting the Buildroot outputs.",
+  "ensure-root-disk.sh and run-phase2.sh treat that promoted current path as the default normal boot source unless the caller provides explicit ROOTFS_SOURCE_IMAGE or KERNEL_IMAGE overrides.",
+  "scripts/promote-guest-boot-default.sh --clear removes the current promoted default and returns default selection to the Buildroot artifacts.",
 ]
 
 [stage0]
@@ -96,23 +175,9 @@ artifacts = [
 
 [stage1]
 owner = "sloppkg"
-purpose = "Expose persistent managed payloads and restore the minimum recoverable world after a root reseed."
-world = [
-  "sloppkg",
-  "selfhost-toolchain",
-  "dropbear",
-  "zlib",
-  "xz",
-  "pkgconf",
-  "libffi",
-  "openssl",
-  "expat",
-  "ncurses",
-  "readline",
-  "sqlite",
-  "zstd",
-  "curl",
-]
+purpose = "Expose persistent managed payloads and restore the recorded managed world after a root reseed, bootstrapping selfhost-world when no world entries exist yet."
+minimum_runtime_profile = "selfhost-base"
+bootstrap_target = "selfhost-world"
 
 [stage2]
 owner = "sloppkg"

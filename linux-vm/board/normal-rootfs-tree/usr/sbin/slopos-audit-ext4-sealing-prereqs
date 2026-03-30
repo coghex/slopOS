@@ -1,0 +1,150 @@
+#!/bin/sh
+set -eu
+
+PERSISTENT_MOUNTPOINT="${PERSISTENT_MOUNTPOINT:-/Volumes/slopos-data}"
+ROOTFS_STATE_ROOT="${ROOTFS_STATE_ROOT:-$PERSISTENT_MOUNTPOINT/rootfs}"
+AUDIT_ROOT="${AUDIT_ROOT:-$ROOTFS_STATE_ROOT/audits}"
+TEMP_DIR=""
+
+cleanup() {
+  if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+    if mountpoint -q "$TEMP_DIR/mnt" >/dev/null 2>&1; then
+      umount "$TEMP_DIR/mnt" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$TEMP_DIR"
+  fi
+}
+
+trap cleanup EXIT HUP INT TERM
+
+command_path() {
+  command -v "$1" 2>/dev/null || true
+}
+
+yesno() {
+  if [ "$1" = "1" ]; then
+    printf 'yes\n'
+  else
+    printf 'no\n'
+  fi
+}
+
+timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+audit_dir="$AUDIT_ROOT/ext4-sealing-$timestamp"
+report_path="$audit_dir/report.txt"
+mkdir -p "$audit_dir"
+
+kernel_release="$(uname -r)"
+mke2fs_path="$(command_path mke2fs)"
+losetup_path="$(command_path losetup)"
+mount_path="$(command_path mount)"
+modprobe_path="$(command_path modprobe)"
+
+mke2fs_help=""
+mke2fs_impl="missing"
+mke2fs_supports_populate_dir=0
+if [ -n "$mke2fs_path" ]; then
+  mke2fs_help="$(mke2fs --help 2>&1 || true)"
+  case "$mke2fs_help" in
+    BusyBox*)
+      mke2fs_impl="busybox"
+      ;;
+    *)
+      mke2fs_impl="other"
+      ;;
+  esac
+  case "$mke2fs_help" in
+    *" -d "*|*"[-d "*)
+      mke2fs_supports_populate_dir=1
+      ;;
+  esac
+fi
+
+loop_device_list="$(find /dev -maxdepth 1 \( -name 'loop*' -o -name 'loop-control' \) -print 2>/dev/null | sort || true)"
+loop_device_count="$(printf '%s\n' "$loop_device_list" | sed '/^$/d' | wc -l | awk '{print $1}')"
+loop_module_path="$(find "/lib/modules/$kernel_release" -type f \( -name 'loop.ko' -o -name 'loop.ko.*' \) -print -quit 2>/dev/null || true)"
+
+modprobe_loop_status=0
+modprobe_loop_output=""
+if [ -n "$modprobe_path" ]; then
+  modprobe_loop_output="$(modprobe loop 2>&1)" || modprobe_loop_status=$?
+else
+  modprobe_loop_status=127
+  modprobe_loop_output="modprobe is unavailable"
+fi
+
+blank_ext4_create_status=127
+blank_ext4_create_output="mke2fs is unavailable"
+loop_mount_status=127
+loop_mount_output="mount is unavailable"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/slopos-ext4-audit.XXXXXX")"
+mkdir -p "$TEMP_DIR/mnt"
+image_path="$TEMP_DIR/test.img"
+
+if [ -n "$mke2fs_path" ]; then
+  dd if=/dev/zero of="$image_path" bs=1M count=8 >/dev/null 2>&1
+  blank_ext4_create_status=0
+  blank_ext4_create_output="$(mke2fs -t ext4 "$image_path" 2>&1)" || blank_ext4_create_status=$?
+fi
+
+if [ -n "$mount_path" ]; then
+  loop_mount_status=0
+  loop_mount_output="$(mount -o loop "$image_path" "$TEMP_DIR/mnt" 2>&1)" || loop_mount_status=$?
+fi
+
+loop_mount_ready=0
+if [ "$loop_mount_status" -eq 0 ]; then
+  loop_mount_ready=1
+fi
+
+guest_native_ext4_ready=0
+guest_native_ext4_path="unavailable"
+if [ "$mke2fs_supports_populate_dir" -eq 1 ]; then
+  guest_native_ext4_ready=1
+  guest_native_ext4_path="mke2fs-d"
+elif [ "$loop_mount_ready" -eq 1 ]; then
+  guest_native_ext4_ready=1
+  guest_native_ext4_path="loop-mount-copy"
+fi
+
+cat >"$report_path" <<EOF
+schema_version: 1
+audited_at: $timestamp
+kernel_release: $kernel_release
+guest_native_ext4_ready: $(yesno "$guest_native_ext4_ready")
+guest_native_ext4_path: $guest_native_ext4_path
+
+[tooling]
+mke2fs_path: ${mke2fs_path:-missing}
+mke2fs_implementation: $mke2fs_impl
+mke2fs_supports_populate_dir: $(yesno "$mke2fs_supports_populate_dir")
+losetup_path: ${losetup_path:-missing}
+mount_path: ${mount_path:-missing}
+modprobe_path: ${modprobe_path:-missing}
+
+[loop]
+loop_device_count: $loop_device_count
+loop_devices:
+$(printf '%s\n' "$loop_device_list" | sed 's/^/  - /')
+loop_module_path: ${loop_module_path:-missing}
+modprobe_loop_status: $modprobe_loop_status
+modprobe_loop_output: $modprobe_loop_output
+loop_mount_status: $loop_mount_status
+loop_mount_output: $loop_mount_output
+
+[image_create]
+blank_ext4_create_status: $blank_ext4_create_status
+blank_ext4_create_output: $blank_ext4_create_output
+
+[required_changes]
+- Install a full e2fsprogs-style mke2fs/mkfs.ext4 with -d support in the guest, or another tool that can populate an ext filesystem directly from a staged tree.
+- Or enable loop-device support in the guest kernel (CONFIG_BLK_DEV_LOOP built in, or a shipped loop module that can be loaded successfully) so the managed util-linux mount/losetup path can mount a blank ext image and copy the assembled tree into it.
+- Keep the existing managed util-linux tooling; the current guest already has losetup and mount, so the missing prerequisites are tree-populating ext image creation and working kernel loop support.
+EOF
+
+echo "Guest ext4 sealing prerequisite audit complete."
+echo "report_path: $report_path"
+echo "guest_native_ext4_ready: $(yesno "$guest_native_ext4_ready")"
+echo "guest_native_ext4_path: $guest_native_ext4_path"
+echo "mke2fs_supports_populate_dir: $(yesno "$mke2fs_supports_populate_dir")"
+echo "loop_mount_ready: $(yesno "$loop_mount_ready")"

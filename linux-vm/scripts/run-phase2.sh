@@ -4,7 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_FILE="$ROOT_DIR/configs/host-guest.env"
 OUTPUT_DIR="$ROOT_DIR/artifacts/buildroot-output"
+OVERRIDE_KERNEL_IMAGE="${KERNEL_IMAGE:-}"
 KERNEL_IMAGE="$OUTPUT_DIR/images/Image"
+PROMOTED_BOOT_ROOT="${HOST_GUEST_PROMOTED_BOOT_ROOT:-$ROOT_DIR/artifacts/guest-boot-promoted}"
+PROMOTED_BOOT_CURRENT="$PROMOTED_BOOT_ROOT/current"
+PROMOTED_KERNEL_IMAGE="$PROMOTED_BOOT_CURRENT/Image"
 RECOVERY_OUTPUT_DIR="$ROOT_DIR/artifacts/buildroot-recovery-output"
 RECOVERY_KERNEL_IMAGE="$RECOVERY_OUTPUT_DIR/images/Image"
 RECOVERY_INITRAMFS_IMAGE="$RECOVERY_OUTPUT_DIR/images/rootfs.cpio.gz"
@@ -28,6 +32,12 @@ if [[ -n "$OVERRIDE_GUEST_SSH_FORWARD_PORT" ]]; then
   GUEST_SSH_FORWARD_PORT="$OVERRIDE_GUEST_SSH_FORWARD_PORT"
 fi
 
+if [[ "$PROMOTED_BOOT_ROOT" != /* ]]; then
+  PROMOTED_BOOT_ROOT="$ROOT_DIR/$PROMOTED_BOOT_ROOT"
+  PROMOTED_BOOT_CURRENT="$PROMOTED_BOOT_ROOT/current"
+  PROMOTED_KERNEL_IMAGE="$PROMOTED_BOOT_CURRENT/Image"
+fi
+
 case "$BOOT_MODE" in
   normal|recovery)
     ;;
@@ -37,6 +47,19 @@ case "$BOOT_MODE" in
     exit 1
     ;;
 esac
+
+if [[ -n "$OVERRIDE_KERNEL_IMAGE" ]]; then
+  KERNEL_IMAGE="$OVERRIDE_KERNEL_IMAGE"
+  if [[ "$KERNEL_IMAGE" != /* ]]; then
+    KERNEL_IMAGE="$ROOT_DIR/$KERNEL_IMAGE"
+  fi
+elif [[ -d "$PROMOTED_BOOT_CURRENT" || -L "$PROMOTED_BOOT_CURRENT" ]]; then
+  if [[ ! -f "$PROMOTED_KERNEL_IMAGE" ]]; then
+    echo "Promoted default boot kernel is incomplete: $PROMOTED_KERNEL_IMAGE" >&2
+    exit 1
+  fi
+  KERNEL_IMAGE="$PROMOTED_KERNEL_IMAGE"
+fi
 
 ROOT_DISK_IMAGE="${OVERRIDE_ROOT_DISK_IMAGE:-$ROOT_DIR/qemu/$ROOT_DISK_FILENAME}"
 PERSISTENT_DISK_IMAGE="${OVERRIDE_PERSISTENT_DISK_IMAGE:-$ROOT_DIR/qemu/$PERSISTENT_DISK_FILENAME}"
@@ -61,12 +84,17 @@ if [[ "$BOOT_MODE" == "normal" ]]; then
   fi
 
   if [[ ! -f "$KERNEL_IMAGE" ]]; then
-    echo "Missing kernel image: $KERNEL_IMAGE" >&2
+    if [[ -n "$OVERRIDE_KERNEL_IMAGE" ]]; then
+      echo "Missing configured kernel image: $KERNEL_IMAGE" >&2
+    else
+      echo "Missing kernel image: $KERNEL_IMAGE" >&2
+    fi
     exit 1
   fi
 
   "$ROOT_DISK_SCRIPT"
   "$PERSISTENT_DISK_SCRIPT"
+  echo "Using normal boot kernel: $KERNEL_IMAGE"
 
   qemu_args+=(
     -kernel "$KERNEL_IMAGE"

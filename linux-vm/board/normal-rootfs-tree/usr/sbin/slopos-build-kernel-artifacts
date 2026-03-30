@@ -1,0 +1,321 @@
+#!/bin/sh
+set -eu
+
+PERSISTENT_MOUNTPOINT="${PERSISTENT_MOUNTPOINT:-/Volumes/slopos-data}"
+KERNEL_STATE_ROOT="${KERNEL_STATE_ROOT:-$PERSISTENT_MOUNTPOINT/kernel}"
+KERNEL_INPUT_ROOT="${KERNEL_INPUT_ROOT:-$KERNEL_STATE_ROOT/input/current}"
+KERNEL_SOURCE_ARCHIVE="${KERNEL_SOURCE_ARCHIVE:-}"
+KERNEL_DEFCONFIG_PATH="${KERNEL_DEFCONFIG_PATH:-$KERNEL_INPUT_ROOT/slopos_aarch64_virt_defconfig}"
+KERNEL_CONFIG_PATH="${KERNEL_CONFIG_PATH:-$KERNEL_INPUT_ROOT/linux.config}"
+KERNEL_PATCH_DIR="${KERNEL_PATCH_DIR:-$KERNEL_INPUT_ROOT/patches/linux}"
+BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
+WORK_ROOT="${WORK_ROOT:-$KERNEL_STATE_ROOT/build}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-$KERNEL_STATE_ROOT/artifacts}"
+LOG_ROOT="${LOG_ROOT:-$KERNEL_STATE_ROOT/logs}"
+LOCK_DIR="${LOCK_DIR:-$KERNEL_STATE_ROOT/locks/build-kernel.lock}"
+CURRENT_PHASE="initializing"
+BUILD_LOG=""
+TEMP_DIR=""
+LOCK_ACQUIRED=0
+KEEP_WORKDIR=0
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: slopos-build-kernel-artifacts [--source-archive <path>] [--defconfig <path>] [--config <path>] [--patch-dir <path>] [--build-jobs <count>] [--keep-workdir]
+
+Builds a guest-native ARM64 kernel Image plus modules using the managed toolchain
+and stores the validated artifact set under /Volumes/slopos-data/kernel.
+EOF
+}
+
+require_exec() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required tool: $1" >&2
+    exit 1
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source-archive)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      KERNEL_SOURCE_ARCHIVE="$2"
+      shift 2
+      ;;
+    --defconfig)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      KERNEL_DEFCONFIG_PATH="$2"
+      shift 2
+      ;;
+    --config)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      KERNEL_CONFIG_PATH="$2"
+      shift 2
+      ;;
+    --patch-dir)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      KERNEL_PATCH_DIR="$2"
+      shift 2
+      ;;
+    --build-jobs)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      BUILD_JOBS="$2"
+      shift 2
+      ;;
+    --keep-workdir)
+      KEEP_WORKDIR=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$KERNEL_SOURCE_ARCHIVE" ]; then
+  if set -- "$KERNEL_INPUT_ROOT"/linux-*.tar.*; [ -f "$1" ]; then
+    KERNEL_SOURCE_ARCHIVE="$1"
+  else
+    echo "Unable to locate kernel source archive under $KERNEL_INPUT_ROOT" >&2
+    exit 1
+  fi
+fi
+
+for tool in gcc make perl bc bison flex openssl tar xz patch sha256sum file find awk sed; do
+  require_exec "$tool"
+done
+
+for path in "$KERNEL_SOURCE_ARCHIVE" "$KERNEL_CONFIG_PATH"; do
+  if [ ! -f "$path" ]; then
+    echo "Missing required input: $path" >&2
+    exit 1
+  fi
+done
+
+if [ -n "$KERNEL_DEFCONFIG_PATH" ] && [ ! -f "$KERNEL_DEFCONFIG_PATH" ]; then
+  echo "Missing defconfig input: $KERNEL_DEFCONFIG_PATH" >&2
+  exit 1
+fi
+
+timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+mkdir -p "$WORK_ROOT" "$ARTIFACT_ROOT" "$LOG_ROOT" "$(dirname "$LOCK_DIR")"
+BUILD_LOG="$LOG_ROOT/${timestamp}-$$.log"
+touch "$BUILD_LOG"
+
+log_line() {
+  printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$BUILD_LOG"
+}
+
+set_phase() {
+  CURRENT_PHASE="$1"
+  log_line "phase $1"
+}
+
+run_logged() {
+  step="$1"
+  shift
+  echo "==> $step"
+  log_line "run: $step"
+  if ! "$@" >>"$BUILD_LOG" 2>&1; then
+    echo "Kernel artifact build failed during: $step" >&2
+    echo "build_log: $BUILD_LOG" >&2
+    tail -n 40 "$BUILD_LOG" >&2 || true
+    exit 1
+  fi
+}
+
+acquire_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_ACQUIRED=1
+    printf '%s\n' "$$" >"$LOCK_DIR/pid"
+    return 0
+  fi
+
+  stale_pid=""
+  if [ -f "$LOCK_DIR/pid" ]; then
+    stale_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  fi
+  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      LOCK_ACQUIRED=1
+      printf '%s\n' "$$" >"$LOCK_DIR/pid"
+      return 0
+    fi
+  fi
+
+  echo "Another kernel build is already running for $KERNEL_STATE_ROOT" >&2
+  if [ -n "$stale_pid" ]; then
+    echo "Lock owner pid: $stale_pid" >&2
+  fi
+  exit 1
+}
+
+cleanup() {
+  status=$?
+  if [ "$LOCK_ACQUIRED" = "1" ]; then
+    rm -rf "$LOCK_DIR"
+  fi
+  if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+    if [ "$status" -eq 0 ] && [ "$KEEP_WORKDIR" != "1" ]; then
+      rm -rf "$TEMP_DIR"
+    else
+      echo "work_dir: $TEMP_DIR" >&2
+    fi
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT HUP INT TERM
+acquire_lock
+
+TEMP_DIR="$WORK_ROOT/${timestamp}-$$"
+SOURCE_ROOT="$TEMP_DIR/source"
+OUTPUT_ROOT="$TEMP_DIR/output"
+MODULE_STAGE_ROOT="$TEMP_DIR/modules"
+mkdir -p "$SOURCE_ROOT" "$OUTPUT_ROOT" "$MODULE_STAGE_ROOT"
+
+set_phase "extract"
+archive_root="$(tar -tf "$KERNEL_SOURCE_ARCHIVE" | head -n 1 | cut -d/ -f1)"
+if [ -z "$archive_root" ]; then
+  echo "Unable to determine source root from $KERNEL_SOURCE_ARCHIVE" >&2
+  exit 1
+fi
+run_logged "Extracting kernel source archive" tar -xf "$KERNEL_SOURCE_ARCHIVE" -C "$SOURCE_ROOT"
+KERNEL_SOURCE_DIR="$SOURCE_ROOT/$archive_root"
+if [ ! -d "$KERNEL_SOURCE_DIR" ]; then
+  echo "Expected extracted source tree missing: $KERNEL_SOURCE_DIR" >&2
+  exit 1
+fi
+
+patch_list_file="$TEMP_DIR/patches.txt"
+: >"$patch_list_file"
+if [ -d "$KERNEL_PATCH_DIR" ]; then
+  find "$KERNEL_PATCH_DIR" -maxdepth 1 -type f -name '*.patch' | sort >"$patch_list_file"
+fi
+PATCH_COUNT="$(wc -l <"$patch_list_file" | awk '{print $1}')"
+
+if [ "$PATCH_COUNT" -gt 0 ]; then
+  set_phase "patch"
+  while IFS= read -r patch_path; do
+    [ -n "$patch_path" ] || continue
+    run_logged "Applying $(basename "$patch_path")" sh -c "patch -d '$KERNEL_SOURCE_DIR' -p1 < '$patch_path'"
+  done <"$patch_list_file"
+fi
+
+set_phase "configure"
+run_logged "Seeding kernel .config" cp "$KERNEL_CONFIG_PATH" "$OUTPUT_ROOT/.config"
+run_logged "Running olddefconfig" make -C "$KERNEL_SOURCE_DIR" O="$OUTPUT_ROOT" ARCH=arm64 olddefconfig
+
+set_phase "build"
+run_logged "Building Image and modules" make -C "$KERNEL_SOURCE_DIR" O="$OUTPUT_ROOT" ARCH=arm64 -j"$BUILD_JOBS" Image modules
+
+set_phase "package"
+KERNEL_RELEASE="$(make -s -C "$KERNEL_SOURCE_DIR" O="$OUTPUT_ROOT" ARCH=arm64 kernelrelease 2>>"$BUILD_LOG")"
+if [ -z "$KERNEL_RELEASE" ]; then
+  echo "Kernel release did not resolve after build" >&2
+  exit 1
+fi
+ARTIFACT_ID="${KERNEL_RELEASE}-${timestamp}"
+ARTIFACT_DIR="$ARTIFACT_ROOT/$ARTIFACT_ID"
+MODULE_DEST="$ARTIFACT_DIR/modules"
+mkdir -p "$ARTIFACT_DIR" "$ARTIFACT_DIR/inputs" "$MODULE_DEST"
+
+run_logged "Copying kernel Image" cp "$OUTPUT_ROOT/arch/arm64/boot/Image" "$ARTIFACT_DIR/Image"
+run_logged "Copying System.map" cp "$OUTPUT_ROOT/System.map" "$ARTIFACT_DIR/System.map"
+run_logged "Copying resolved kernel config" cp "$OUTPUT_ROOT/.config" "$ARTIFACT_DIR/linux.config"
+if [ -f "$OUTPUT_ROOT/Module.symvers" ]; then
+  run_logged "Copying Module.symvers" cp "$OUTPUT_ROOT/Module.symvers" "$ARTIFACT_DIR/Module.symvers"
+fi
+run_logged "Recording source defconfig" cp "$KERNEL_DEFCONFIG_PATH" "$ARTIFACT_DIR/inputs/$(basename "$KERNEL_DEFCONFIG_PATH")"
+run_logged "Recording source kernel config" cp "$KERNEL_CONFIG_PATH" "$ARTIFACT_DIR/inputs/$(basename "$KERNEL_CONFIG_PATH")"
+if [ -d "$KERNEL_PATCH_DIR" ]; then
+  mkdir -p "$ARTIFACT_DIR/inputs/patches"
+  if [ "$PATCH_COUNT" -gt 0 ]; then
+    while IFS= read -r patch_path; do
+      [ -n "$patch_path" ] || continue
+      run_logged "Recording $(basename "$patch_path")" cp "$patch_path" "$ARTIFACT_DIR/inputs/patches/$(basename "$patch_path")"
+    done <"$patch_list_file"
+  fi
+fi
+
+run_logged "Installing kernel modules" make -C "$KERNEL_SOURCE_DIR" O="$OUTPUT_ROOT" ARCH=arm64 DEPMOD=true INSTALL_MOD_PATH="$MODULE_DEST" modules_install
+rm -f "$MODULE_DEST/lib/modules/$KERNEL_RELEASE/build" "$MODULE_DEST/lib/modules/$KERNEL_RELEASE/source"
+
+set_phase "validate"
+if [ ! -s "$ARTIFACT_DIR/Image" ]; then
+  echo "Built Image is missing or empty: $ARTIFACT_DIR/Image" >&2
+  exit 1
+fi
+if [ ! -d "$MODULE_DEST/lib/modules/$KERNEL_RELEASE" ]; then
+  echo "Installed modules directory is missing: $MODULE_DEST/lib/modules/$KERNEL_RELEASE" >&2
+  exit 1
+fi
+MODULE_COUNT="$(find "$MODULE_DEST/lib/modules/$KERNEL_RELEASE" -type f -name '*.ko*' | wc -l | awk '{print $1}')"
+if [ "$MODULE_COUNT" -le 0 ]; then
+  echo "No kernel modules were installed under $MODULE_DEST/lib/modules/$KERNEL_RELEASE" >&2
+  exit 1
+fi
+IMAGE_FILE_OUTPUT="$(file "$ARTIFACT_DIR/Image" | sed 's/"/\\"/g')"
+DEFCONFIG_SHA="$(sha256sum "$KERNEL_DEFCONFIG_PATH" | awk '{print $1}')"
+CONFIG_SHA="$(sha256sum "$KERNEL_CONFIG_PATH" | awk '{print $1}')"
+ARCHIVE_SHA="$(sha256sum "$KERNEL_SOURCE_ARCHIVE" | awk '{print $1}')"
+PATCH_SHA_FILE="$ARTIFACT_DIR/inputs/patches.sha256"
+: >"$PATCH_SHA_FILE"
+if [ "$PATCH_COUNT" -gt 0 ]; then
+  while IFS= read -r patch_path; do
+    [ -n "$patch_path" ] || continue
+    sha256sum "$patch_path" >>"$PATCH_SHA_FILE"
+  done <"$patch_list_file"
+fi
+
+cat >"$ARTIFACT_DIR/manifest.toml" <<EOF
+schema_version = 1
+artifact_id = "$ARTIFACT_ID"
+built_at = "$timestamp"
+kernel_release = "$KERNEL_RELEASE"
+source_archive = "$(basename "$KERNEL_SOURCE_ARCHIVE")"
+source_archive_sha256 = "$ARCHIVE_SHA"
+source_defconfig = "$(basename "$KERNEL_DEFCONFIG_PATH")"
+source_defconfig_sha256 = "$DEFCONFIG_SHA"
+source_kernel_config = "$(basename "$KERNEL_CONFIG_PATH")"
+source_kernel_config_sha256 = "$CONFIG_SHA"
+patch_count = $PATCH_COUNT
+module_count = $MODULE_COUNT
+image_file = "$IMAGE_FILE_OUTPUT"
+build_log = "$BUILD_LOG"
+artifact_root = "$ARTIFACT_DIR"
+EOF
+
+ln -sfn "$ARTIFACT_ID" "$ARTIFACT_ROOT/current"
+set_phase "complete"
+log_line "kernel artifact build complete"
+
+echo "Guest-native kernel artifacts built."
+echo "  artifact_id: $ARTIFACT_ID"
+echo "  kernel_release: $KERNEL_RELEASE"
+echo "  artifact_root: $ARTIFACT_DIR"
+echo "  current_root: $ARTIFACT_ROOT/current"
+echo "  module_count: $MODULE_COUNT"
+echo "  build_log: $BUILD_LOG"

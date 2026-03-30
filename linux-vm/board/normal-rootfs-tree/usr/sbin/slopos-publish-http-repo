@@ -1,0 +1,218 @@
+#!/bin/sh
+set -eu
+
+STATE_ROOT="${STATE_ROOT:-/Volumes/slopos-data/pkg}"
+GUEST_RECIPE_ROOT="${GUEST_RECIPE_ROOT:-/Volumes/slopos-data/packages}"
+GUEST_HTTP_REPO_PORT="${GUEST_HTTP_REPO_PORT:-18083}"
+GUEST_HTTP_REPO_BIND="${GUEST_HTTP_REPO_BIND:-127.0.0.1}"
+REPO_NAME="${REPO_NAME:-workspace}"
+CHANNEL="${CHANNEL:-stable}"
+REVISION="${REVISION:-}"
+GUEST_SLOPPKG_BIN="${GUEST_SLOPPKG_BIN:-/usr/local/bin/sloppkg}"
+PID_FILE="${PID_FILE:-$STATE_ROOT/http-repo.pid}"
+LOG_FILE="${LOG_FILE:-$STATE_ROOT/http-repo.log}"
+NO_REMEMBER="${NO_REMEMBER:-0}"
+SKIP_REPO_CONFIG="${SKIP_REPO_CONFIG:-0}"
+SERVE_ONLY=0
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: slopos-publish-http-repo [--repo-name <name>] [--channel <name>] [--revision <name>] [--no-remember] [--skip-repo-config] [--serve-only]
+
+  --repo-name <name>     Publish and serve the named unified repo.
+  --channel <name>       Publish into the selected channel.
+  --revision <name>      Publish a specific revision name.
+  --no-remember          Publish without recording auto-republish state.
+  --skip-repo-config     Do not add/update this repo in local sloppkg config.
+  --serve-only           Reuse the existing published live root without exporting again.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo-name)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      REPO_NAME="$2"
+      shift 2
+      ;;
+    --channel)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      CHANNEL="$2"
+      shift 2
+      ;;
+    --revision)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      REVISION="$2"
+      shift 2
+      ;;
+    --no-remember)
+      NO_REMEMBER=1
+      shift
+      ;;
+    --skip-repo-config)
+      SKIP_REPO_CONFIG=1
+      shift
+      ;;
+    --serve-only)
+      SERVE_ONLY=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+GUEST_HTTP_REPO_ROOT="${GUEST_HTTP_REPO_ROOT:-$STATE_ROOT/published/$REPO_NAME/live}"
+
+if [ ! -x "$GUEST_SLOPPKG_BIN" ]; then
+  echo "Missing guest sloppkg binary: $GUEST_SLOPPKG_BIN" >&2
+  exit 1
+fi
+
+stop_pid() {
+  pid="$1"
+  if [ -z "$pid" ]; then
+    return 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  kill "$pid"
+  for _ in 1 2 3 4 5; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+server_healthy() {
+  python3 - "$GUEST_HTTP_REPO_BIND" "$GUEST_HTTP_REPO_PORT" <<'PY'
+import sys
+import urllib.request
+
+bind = sys.argv[1]
+port = sys.argv[2]
+try:
+    with urllib.request.urlopen(f"http://{bind}:{port}/repo.toml", timeout=2) as response:
+        sys.exit(0 if response.status == 200 else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+mkdir -p "$STATE_ROOT"
+
+if [ "$SERVE_ONLY" != "1" ]; then
+  if [ -n "$REVISION" ]; then
+    set -- \
+      "$GUEST_SLOPPKG_BIN" \
+      --state-root "$STATE_ROOT" \
+      --recipe-root "$GUEST_RECIPE_ROOT" \
+      repo publish \
+      --name "$REPO_NAME" \
+      --channel "$CHANNEL" \
+      --revision "$REVISION"
+  else
+    set -- \
+      "$GUEST_SLOPPKG_BIN" \
+      --state-root "$STATE_ROOT" \
+      --recipe-root "$GUEST_RECIPE_ROOT" \
+      repo publish \
+      --name "$REPO_NAME" \
+      --channel "$CHANNEL"
+  fi
+
+  if [ "$NO_REMEMBER" = "1" ]; then
+    set -- "$@" --no-remember
+  fi
+
+  "$@" >/dev/null
+fi
+
+if [ -f "$PID_FILE" ]; then
+  stop_pid "$(cat "$PID_FILE" || true)"
+fi
+
+existing_pids="$(
+  ps -ef | awk -v port="$GUEST_HTTP_REPO_PORT" '
+    $0 ~ ("python3 -m http.server " port) && $0 !~ /awk/ && $1 ~ /^[0-9]+$/ { print $1 }
+  '
+)"
+for existing_pid in $existing_pids; do
+  stop_pid "$existing_pid"
+done
+
+nohup python3 -m http.server "$GUEST_HTTP_REPO_PORT" \
+  --bind "$GUEST_HTTP_REPO_BIND" \
+  --directory "$GUEST_HTTP_REPO_ROOT" \
+  >"$LOG_FILE" 2>&1 </dev/null &
+echo "$!" > "$PID_FILE"
+
+for _ in 1 2 3 4 5; do
+  if server_healthy; then
+    break
+  fi
+  sleep 1
+done
+
+if ! server_healthy; then
+  echo "Guest HTTP repo server failed to start on $GUEST_HTTP_REPO_BIND:$GUEST_HTTP_REPO_PORT" >&2
+  exit 1
+fi
+
+if [ "$SKIP_REPO_CONFIG" != "1" ]; then
+  "$GUEST_SLOPPKG_BIN" \
+    --state-root "$STATE_ROOT" \
+    repo add \
+    --name "$REPO_NAME" \
+    --kind unified \
+    --url "http://$GUEST_HTTP_REPO_BIND:$GUEST_HTTP_REPO_PORT" \
+    --channel "$CHANNEL" >/dev/null
+
+  "$GUEST_SLOPPKG_BIN" \
+    --state-root "$STATE_ROOT" \
+    update \
+    --name "$REPO_NAME" >/dev/null
+fi
+
+echo "Published guest unified repo:"
+echo "  name: $REPO_NAME"
+echo "  url: http://$GUEST_HTTP_REPO_BIND:$GUEST_HTTP_REPO_PORT"
+echo "  recipe_root: $GUEST_RECIPE_ROOT"
+echo "  live_root: $GUEST_HTTP_REPO_ROOT"
+echo "  channel: $CHANNEL"
+if [ -n "$REVISION" ]; then
+  echo "  revision: $REVISION"
+fi
+if [ "$SERVE_ONLY" = "1" ]; then
+  echo "  published: no (serve-only)"
+else
+  echo "  published: yes"
+fi
+if [ "$NO_REMEMBER" = "1" ]; then
+  echo "  remembered: no"
+else
+  echo "  remembered: yes"
+fi
+if [ "$SKIP_REPO_CONFIG" = "1" ]; then
+  echo "  repo_config_updated: no"
+else
+  echo "  repo_config_updated: yes"
+fi

@@ -1,0 +1,137 @@
+#!/bin/sh
+set -eu
+
+STATE_ROOT="${STATE_ROOT:-/Volumes/slopos-data/pkg}"
+GUEST_RECIPE_ROOT="${GUEST_RECIPE_ROOT:-/Volumes/slopos-data/packages}"
+GUEST_SLOPPKG_BIN="${GUEST_SLOPPKG_BIN:-/usr/local/bin/sloppkg}"
+PERSISTENT_MOUNTPOINT="${PERSISTENT_MOUNTPOINT:-/Volumes/slopos-data}"
+SELFHOST_FINAL_BIN="${SELFHOST_FINAL_BIN:-$PERSISTENT_MOUNTPOINT/toolchain/selfhost-sysroot/final/bin}"
+DISTFILES_DIR="${DISTFILES_DIR:-$STATE_ROOT/distfiles}"
+BUILD_LOG_DIR="${BUILD_LOG_DIR:-$STATE_ROOT/logs/builds}"
+WORLD_TARGET=""
+TARGETS=""
+FETCH_TARGETS=1
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: slopos-validate-rebuild-readiness [--package <name>] [--world-target <name>] [--no-fetch]
+
+  --package <name>      Resolve and fetch one rebuild target (may be repeated).
+  --world-target <name> Resolve and fetch a world/meta package target.
+  --no-fetch            Skip sloppkg fetch after resolve checks.
+EOF
+}
+
+append_target() {
+  if [ -z "$TARGETS" ]; then
+    TARGETS="$1"
+  else
+    TARGETS="$TARGETS $1"
+  fi
+}
+
+require_exec() {
+  path="$1"
+  label="$2"
+  if [ ! -x "$path" ]; then
+    echo "Missing executable $label: $path" >&2
+    exit 1
+  fi
+}
+
+require_dir() {
+  path="$1"
+  label="$2"
+  if [ ! -d "$path" ]; then
+    echo "Missing directory $label: $path" >&2
+    exit 1
+  fi
+}
+
+require_writable_dir() {
+  path="$1"
+  label="$2"
+  mkdir -p "$path"
+  probe="$path/.slopos-write-test.$$"
+  : >"$probe" 2>/dev/null || {
+    echo "Directory is not writable for $label: $path" >&2
+    exit 1
+  }
+  rm -f "$probe"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --package)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      append_target "$2"
+      shift 2
+      ;;
+    --world-target)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      WORLD_TARGET="$2"
+      shift 2
+      ;;
+    --no-fetch)
+      FETCH_TARGETS=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ -n "$WORLD_TARGET" ]; then
+  append_target "$WORLD_TARGET"
+fi
+
+require_dir "$PERSISTENT_MOUNTPOINT" "persistent mountpoint"
+require_dir "$GUEST_RECIPE_ROOT" "guest recipe root"
+require_exec "$GUEST_SLOPPKG_BIN" "guest sloppkg"
+require_exec "$SELFHOST_FINAL_BIN/selfhost-gcc" "selfhost gcc"
+require_exec "$SELFHOST_FINAL_BIN/selfhost-g++" "selfhost g++"
+require_writable_dir "$STATE_ROOT" "state root"
+require_writable_dir "$DISTFILES_DIR" "distfiles"
+require_writable_dir "$BUILD_LOG_DIR" "build log directory"
+
+first_recipe="$(find "$GUEST_RECIPE_ROOT" -name package.toml -print -quit 2>/dev/null || true)"
+if [ -z "$first_recipe" ]; then
+  echo "No package recipes found under $GUEST_RECIPE_ROOT" >&2
+  exit 1
+fi
+
+for target in $TARGETS; do
+  "$GUEST_SLOPPKG_BIN" \
+    --state-root "$STATE_ROOT" \
+    --recipe-root "$GUEST_RECIPE_ROOT" \
+    resolve "$target" >/dev/null
+
+  if [ "$FETCH_TARGETS" = "1" ]; then
+    "$GUEST_SLOPPKG_BIN" \
+      --state-root "$STATE_ROOT" \
+      --recipe-root "$GUEST_RECIPE_ROOT" \
+      fetch "$target" >/dev/null
+  fi
+done
+
+echo "Managed-world rebuild readiness checks passed."
+echo "  state_root: $STATE_ROOT"
+echo "  recipe_root: $GUEST_RECIPE_ROOT"
+echo "  selfhost_bin: $SELFHOST_FINAL_BIN"
+echo "  build_logs: $BUILD_LOG_DIR"
+if [ -n "$TARGETS" ]; then
+  echo "  verified_targets: $TARGETS"
+fi

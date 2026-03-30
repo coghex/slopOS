@@ -2,8 +2,17 @@
 set -euo pipefail
 
 TARGET_DIR="${1:?missing target dir}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NORMAL_SEED_TREE="$SCRIPT_DIR/normal-rootfs-tree"
+MUTABLE_OVERLAY_DIR="$SCRIPT_DIR/rootfs-overlay"
+MUTABLE_AUTHORIZED_KEYS="$MUTABLE_OVERLAY_DIR/root/.ssh/authorized_keys"
 BUSYBOX_BIN="$TARGET_DIR/bin/busybox"
 removed=0
+
+if [[ ! -d "$NORMAL_SEED_TREE" ]]; then
+  echo "missing normal seed tree: $NORMAL_SEED_TREE" >&2
+  exit 1
+fi
 
 prune_busybox_link() {
   local target="$1"
@@ -34,6 +43,51 @@ prune_any_busybox_link() {
   rm -f "$target"
   ((removed += 1))
 }
+
+install_normal_seed_tree() {
+  local source
+  local relative
+  local destination
+  local mode
+
+  while IFS= read -r -d '' source; do
+    relative="${source#$NORMAL_SEED_TREE/}"
+    destination="$TARGET_DIR/$relative"
+    install -d -m 0755 "$destination"
+  done < <(find "$NORMAL_SEED_TREE" -type d -print0)
+
+  while IFS= read -r -d '' source; do
+    relative="${source#$NORMAL_SEED_TREE/}"
+    destination="$TARGET_DIR/$relative"
+    rm -f "$destination"
+    if [[ -x "$source" ]]; then
+      mode=0755
+    else
+      mode=0644
+    fi
+    install -D -m "$mode" "$source" "$destination"
+  done < <(find "$NORMAL_SEED_TREE" -type f -print0)
+
+  while IFS= read -r -d '' source; do
+    relative="${source#$NORMAL_SEED_TREE/}"
+    destination="$TARGET_DIR/$relative"
+    rm -f "$destination"
+    install -d -m 0755 "$(dirname "$destination")"
+    ln -snf "$(readlink "$source")" "$destination"
+  done < <(find "$NORMAL_SEED_TREE" -type l -print0)
+}
+
+install_mutable_seed_inputs() {
+  if [[ -f "$MUTABLE_AUTHORIZED_KEYS" ]]; then
+    install -d -m 0700 "$TARGET_DIR/root/.ssh"
+    install -m 0600 "$MUTABLE_AUTHORIZED_KEYS" "$TARGET_DIR/root/.ssh/authorized_keys"
+  else
+    rm -f "$TARGET_DIR/root/.ssh/authorized_keys"
+  fi
+}
+
+install_normal_seed_tree
+install_mutable_seed_inputs
 
 for target in \
   "$TARGET_DIR/bin/arch" \

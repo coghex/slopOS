@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -187,12 +187,30 @@ pub enum AppError {
     UnknownRepository(String),
     #[error("repository {repo} has no cached snapshot yet; run sloppkg update")]
     UnifiedRepoNotUpdated { repo: String },
+    #[error("published repo {0} has no recorded publish state")]
+    MissingPublishState(String),
+    #[error("published revision {revision} for repo {repo} channel {channel} does not exist")]
+    MissingPublishedRevision {
+        repo: String,
+        channel: String,
+        revision: String,
+    },
+    #[error("published repo {repo} has no live revision for channel {channel}")]
+    MissingPublishedLiveRevision { repo: String, channel: String },
     #[error("this operation requires --recipe-root or a workspace checkout")]
     MissingRecipeRoot,
     #[error("recipe path has no parent directory: {0}")]
     InvalidRecipePath(PathBuf),
     #[error("maintenance command failed: {command} exited with {status}")]
     MaintenanceCommandFailed { command: String, status: String },
+    #[error(
+        "transaction {transaction_id} applied package changes but post-success maintenance failed; see {transaction_path}: {reason}"
+    )]
+    PostTransactionMaintenanceFailed {
+        transaction_id: i64,
+        transaction_path: PathBuf,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -267,6 +285,20 @@ pub struct RepoPublishReport {
     pub keep_revisions: usize,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct RepoPromoteReport {
+    pub source_repo_name: String,
+    pub source_channel: String,
+    pub source_revision: String,
+    pub source_published_root: PathBuf,
+    pub target_repo_name: String,
+    pub target_channel: String,
+    pub target_revision: String,
+    pub target_published_root: PathBuf,
+    pub target_live_root: PathBuf,
+    pub keep_revisions: usize,
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CleanupTarget {
@@ -282,6 +314,26 @@ struct PublishState {
     source_root: String,
     channel: String,
     keep_revisions: usize,
+    #[serde(default = "publish_state_remember_default")]
+    remember: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RepoPublishOptions {
+    pub remember_publish_state: bool,
+}
+
+impl Default for RepoPublishOptions {
+    fn default() -> Self {
+        Self {
+            remember_publish_state: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TransactionOptions {
+    pub skip_publish_maintenance: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -306,6 +358,33 @@ pub struct CleanupReport {
     pub total_removed: usize,
     pub total_kept: usize,
     pub total_bytes_reclaimed: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DependentPackageReport {
+    pub package_name: String,
+    pub install_reason: String,
+    pub world_member: bool,
+    pub direct: bool,
+    pub depth: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DependentsReport {
+    pub package_name: String,
+    pub transitive: bool,
+    pub packages: Vec<DependentPackageReport>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheStatusReport {
+    pub package_name: String,
+    pub version: String,
+    pub status: String,
+    pub recipe_hash: String,
+    pub archive_path: Option<PathBuf>,
+    pub archive_sha256: Option<String>,
+    pub build_transaction_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -510,6 +589,25 @@ impl App {
         revision: Option<&str>,
         keep_revisions: usize,
     ) -> Result<RepoPublishReport, AppError> {
+        self.publish_repo_with_options(
+            recipe_root,
+            repo_name_override,
+            channel,
+            revision,
+            keep_revisions,
+            RepoPublishOptions::default(),
+        )
+    }
+
+    pub fn publish_repo_with_options(
+        &self,
+        recipe_root: Option<&Path>,
+        repo_name_override: Option<&str>,
+        channel: &str,
+        revision: Option<&str>,
+        keep_revisions: usize,
+        options: RepoPublishOptions,
+    ) -> Result<RepoPublishReport, AppError> {
         self.paths.create_layout()?;
         let recipe_root = recipe_root.ok_or(AppError::MissingRecipeRoot)?;
         let temp_root = self
@@ -564,6 +662,7 @@ impl App {
                 source_root: recipe_root.display().to_string(),
                 channel: channel.to_owned(),
                 keep_revisions,
+                remember: options.remember_publish_state,
             },
         )?;
 
@@ -577,6 +676,110 @@ impl App {
             package_count: export.package_count,
             version_count: export.version_count,
             file_count: export.file_count,
+            keep_revisions,
+        })
+    }
+
+    pub fn promote_repo(
+        &self,
+        source_repo_name: &str,
+        source_channel: &str,
+        source_revision: Option<&str>,
+        target_repo_name: &str,
+        target_channel: &str,
+        keep_revisions: usize,
+    ) -> Result<RepoPromoteReport, AppError> {
+        self.paths.create_layout()?;
+        let source_state = self
+            .read_publish_state(source_repo_name)?
+            .ok_or_else(|| AppError::MissingPublishState(source_repo_name.to_owned()))?;
+        let source_repo_root = self.published_repo_root(source_repo_name);
+        let (resolved_source_revision, source_published_root) = if let Some(revision_name) =
+            source_revision
+        {
+            let root = source_repo_root
+                .join("revisions")
+                .join(sanitize(source_channel))
+                .join(sanitize(revision_name));
+            if !root.exists() {
+                return Err(AppError::MissingPublishedRevision {
+                    repo: source_repo_name.to_owned(),
+                    channel: source_channel.to_owned(),
+                    revision: revision_name.to_owned(),
+                });
+            }
+            (revision_name.to_owned(), root)
+        } else {
+            let live_root = source_repo_root.join("live");
+            if !path_exists(&live_root) {
+                return Err(AppError::MissingPublishedLiveRevision {
+                    repo: source_repo_name.to_owned(),
+                    channel: source_channel.to_owned(),
+                });
+            }
+            let canonical = normalize_existing_path(&live_root);
+            let expected_prefix = source_repo_root.join("revisions").join(sanitize(source_channel));
+            if !canonical.starts_with(&expected_prefix) {
+                return Err(AppError::MissingPublishedLiveRevision {
+                    repo: source_repo_name.to_owned(),
+                    channel: source_channel.to_owned(),
+                });
+            }
+            let revision_name = canonical
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .ok_or_else(|| AppError::MissingPublishedLiveRevision {
+                    repo: source_repo_name.to_owned(),
+                    channel: source_channel.to_owned(),
+                })?;
+            (revision_name, canonical)
+        };
+
+        let target_repo_root = self.published_repo_root(target_repo_name);
+        let target_revisions_root = target_repo_root.join("revisions").join(sanitize(target_channel));
+        fs::create_dir_all(&target_revisions_root).map_err(|source| AppError::Io {
+            path: target_revisions_root.clone(),
+            source,
+        })?;
+        let target_published_root = target_revisions_root.join(sanitize(&resolved_source_revision));
+        if target_published_root.exists() {
+            fs::remove_dir_all(&target_published_root).map_err(|source| AppError::Io {
+                path: target_published_root.clone(),
+                source,
+            })?;
+        }
+        copy_tree_into(&source_published_root, &target_published_root)?;
+
+        let target_live_root = target_repo_root.join("live");
+        if path_exists(&target_live_root) {
+            remove_existing_path(&target_live_root)?;
+        }
+        symlink(&target_published_root, &target_live_root).map_err(|source| AppError::Io {
+            path: target_live_root.clone(),
+            source,
+        })?;
+
+        self.write_publish_state(
+            target_repo_name,
+            &PublishState {
+                repo_name: target_repo_name.to_owned(),
+                source_root: source_state.source_root,
+                channel: target_channel.to_owned(),
+                keep_revisions,
+                remember: true,
+            },
+        )?;
+
+        Ok(RepoPromoteReport {
+            source_repo_name: source_repo_name.to_owned(),
+            source_channel: source_channel.to_owned(),
+            source_revision: resolved_source_revision.clone(),
+            source_published_root,
+            target_repo_name: target_repo_name.to_owned(),
+            target_channel: target_channel.to_owned(),
+            target_revision: resolved_source_revision,
+            target_published_root,
+            target_live_root,
             keep_revisions,
         })
     }
@@ -614,16 +817,173 @@ impl App {
         package_name: &str,
         constraint: &str,
     ) -> Result<TransactionPlan, AppError> {
+        self.resolve_many(recipe_root, &[package_name.to_owned()], constraint)
+    }
+
+    pub fn resolve_many(
+        &self,
+        recipe_root: Option<&Path>,
+        package_names: &[String],
+        constraint: &str,
+    ) -> Result<TransactionPlan, AppError> {
+        let parsed = Constraint::parse(constraint)?;
+        let requests = package_names
+            .iter()
+            .map(|package_name| RequestedPackage {
+                name: package_name.clone(),
+                constraint: parsed.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.resolve_requests(recipe_root, &requests)
+    }
+
+    fn resolve_requests(
+        &self,
+        recipe_root: Option<&Path>,
+        requests: &[RequestedPackage],
+    ) -> Result<TransactionPlan, AppError> {
         let packages = self.load_packages(recipe_root)?;
-        solve(
-            &packages,
-            &[RequestedPackage {
-                name: package_name.to_owned(),
-                constraint: Constraint::parse(constraint)?,
-            }],
-            &SolveOptions::default(),
-        )
-        .map_err(AppError::from)
+        solve(&packages, requests, &SolveOptions::default()).map_err(AppError::from)
+    }
+
+    pub fn dependents(
+        &self,
+        package_name: &str,
+        transitive: bool,
+    ) -> Result<DependentsReport, AppError> {
+        self.paths.create_layout()?;
+        init_db(&self.paths.database_path)?;
+
+        let installed = installed_package_map(list_installed_packages(&self.paths.database_path)?);
+        if !installed.contains_key(package_name) {
+            return Err(AppError::PackageNotInstalled(package_name.to_owned()));
+        }
+        let world_names = list_world_entries(&self.paths.database_path)?
+            .into_iter()
+            .map(|entry| entry.package_name)
+            .collect::<HashSet<_>>();
+        let mut dependents_by_dependency = BTreeMap::<String, BTreeSet<String>>::new();
+        for edge in list_installed_dependencies(&self.paths.database_path)? {
+            dependents_by_dependency
+                .entry(edge.dependency_name)
+                .or_default()
+                .insert(edge.package_name);
+        }
+
+        let direct_dependents = dependents_by_dependency
+            .get(package_name)
+            .cloned()
+            .unwrap_or_default();
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::new();
+        for dependent in direct_dependents {
+            queue.push_back((dependent, 1usize));
+        }
+
+        let mut packages = Vec::new();
+        while let Some((dependent, depth)) = queue.pop_front() {
+            if !seen.insert(dependent.clone()) {
+                continue;
+            }
+            let Some(installed_record) = installed.get(&dependent) else {
+                continue;
+            };
+            packages.push(DependentPackageReport {
+                package_name: dependent.clone(),
+                install_reason: installed_record.install_reason.clone(),
+                world_member: world_names.contains(&dependent),
+                direct: depth == 1,
+                depth,
+            });
+
+            if !transitive {
+                continue;
+            }
+            if let Some(next_dependents) = dependents_by_dependency.get(&dependent) {
+                for next in next_dependents {
+                    if !seen.contains(next) {
+                        queue.push_back((next.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+
+        Ok(DependentsReport {
+            package_name: package_name.to_owned(),
+            transitive,
+            packages,
+        })
+    }
+
+    pub fn cache_status(
+        &self,
+        recipe_root: Option<&Path>,
+        package_name: &str,
+        constraint: &str,
+    ) -> Result<CacheStatusReport, AppError> {
+        self.paths.create_layout()?;
+        init_db(&self.paths.database_path)?;
+
+        let plan = self.resolve(recipe_root, package_name, constraint)?;
+        let selected = plan
+            .packages
+            .iter()
+            .find(|planned| planned.package.package.name == package_name)
+            .map(|planned| planned.package.clone())
+            .ok_or_else(|| AppError::MissingRequestedPackage(package_name.to_owned()))?;
+        let recipe_hash = recipe_source_hash(&selected)?;
+        let arch = selected
+            .package
+            .architectures
+            .first()
+            .cloned()
+            .unwrap_or_else(|| String::from("any"));
+        let records = find_cache_packages(
+            &self.paths.database_path,
+            &selected.package.name,
+            selected.package.evr.epoch,
+            &selected.package.evr.version,
+            &selected.package.evr.release,
+            &arch,
+        )?;
+
+        let mut available_record = None;
+        let mut matching_record = None;
+        for record in records {
+            if !Path::new(&record.archive_path).exists() {
+                continue;
+            }
+            if available_record.is_none() {
+                available_record = Some(record.clone());
+            }
+            if record.recipe_hash.as_deref() == Some(recipe_hash.as_str()) {
+                matching_record = Some(record);
+                break;
+            }
+        }
+
+        let selected_record = matching_record.clone().or_else(|| available_record.clone());
+        let status = if matching_record.is_some() {
+            "ready"
+        } else if available_record.is_some() {
+            "stale"
+        } else {
+            "missing"
+        };
+
+        Ok(CacheStatusReport {
+            package_name: selected.package.name.clone(),
+            version: selected.package.evr.to_string(),
+            status: status.to_owned(),
+            recipe_hash,
+            archive_path: selected_record
+                .as_ref()
+                .map(|record| PathBuf::from(record.archive_path.clone())),
+            archive_sha256: selected_record
+                .as_ref()
+                .map(|record| record.checksum.clone()),
+            build_transaction_id: selected_record.map(|record| record.build_transaction_id),
+        })
     }
 
     pub fn fetch(
@@ -752,6 +1112,7 @@ impl App {
             &actions,
         )?;
         update_transaction_status(&self.paths.database_path, transaction_id, "building")?;
+        let log_path = self.build_log_path(transaction_id, &selected.package.name);
 
         let build_result = stage_package(
             &selected,
@@ -759,6 +1120,7 @@ impl App {
             &self.paths.build_dir,
             &self.paths.packages_dir,
             transaction_id,
+            &log_path,
             &[],
         );
 
@@ -813,6 +1175,25 @@ impl App {
                 Ok(report)
             }
             Err(err) => {
+                let transaction_path = self
+                    .paths
+                    .transactions_dir
+                    .join(format!("{transaction_id}.json"));
+                let transaction_json = serde_json::to_vec_pretty(&json!({
+                    "transaction_id": transaction_id,
+                    "operation": "build-package",
+                    "requested": {
+                        "package": package_name,
+                        "constraint": constraint,
+                    },
+                    "status": "failed",
+                    "log_path": log_path,
+                    "error": err.to_string(),
+                }))?;
+                fs::write(&transaction_path, transaction_json).map_err(|source| AppError::Io {
+                    path: transaction_path,
+                    source,
+                })?;
                 let _ =
                     update_transaction_status(&self.paths.database_path, transaction_id, "failed");
                 Err(AppError::from(err))
@@ -843,6 +1224,23 @@ impl App {
         package_name: &str,
         constraint: &str,
         target_root: &Path,
+    ) -> Result<TransactionReport, AppError> {
+        self.install_with_options(
+            recipe_root,
+            package_name,
+            constraint,
+            target_root,
+            TransactionOptions::default(),
+        )
+    }
+
+    pub fn install_with_options(
+        &self,
+        recipe_root: Option<&Path>,
+        package_name: &str,
+        constraint: &str,
+        target_root: &Path,
+        options: TransactionOptions,
     ) -> Result<TransactionReport, AppError> {
         self.paths.create_layout()?;
         init_db(&self.paths.database_path)?;
@@ -884,14 +1282,22 @@ impl App {
             }),
         )?;
         upsert_world_entry(&self.paths.database_path, package_name, constraint)?;
-        self.run_post_success_maintenance(target_root)?;
-        Ok(report)
+        self.finalize_transaction(report, target_root, options)
     }
 
     pub fn remove(
         &self,
         package_name: &str,
         target_root: &Path,
+    ) -> Result<TransactionReport, AppError> {
+        self.remove_with_options(package_name, target_root, TransactionOptions::default())
+    }
+
+    pub fn remove_with_options(
+        &self,
+        package_name: &str,
+        target_root: &Path,
+        options: TransactionOptions,
     ) -> Result<TransactionReport, AppError> {
         self.paths.create_layout()?;
         init_db(&self.paths.database_path)?;
@@ -930,14 +1336,22 @@ impl App {
             }),
         )?;
         remove_world_entry(&self.paths.database_path, package_name)?;
-        self.run_post_success_maintenance(target_root)?;
-        Ok(report)
+        self.finalize_transaction(report, target_root, options)
     }
 
     pub fn upgrade(
         &self,
         recipe_root: Option<&Path>,
         target_root: &Path,
+    ) -> Result<TransactionReport, AppError> {
+        self.upgrade_with_options(recipe_root, target_root, TransactionOptions::default())
+    }
+
+    pub fn upgrade_with_options(
+        &self,
+        recipe_root: Option<&Path>,
+        target_root: &Path,
+        options: TransactionOptions,
     ) -> Result<TransactionReport, AppError> {
         self.paths.create_layout()?;
         init_db(&self.paths.database_path)?;
@@ -1005,8 +1419,7 @@ impl App {
                 })).collect::<Vec<_>>(),
             }),
         )?;
-        self.run_post_success_maintenance(target_root)?;
-        Ok(report)
+        self.finalize_transaction(report, target_root, options)
     }
 
     pub fn index_binary_repo(
@@ -1037,10 +1450,11 @@ impl App {
 
     pub fn format_build_report(report: &BuildReport) -> String {
         format!(
-            "staged {} {}\ntransaction: {}\nwork_dir: {}\nstage_root: {}\nmanifest: {}\narchive: {}\narchive_sha256: {}\narchive_size: {}\nentries: {}\n",
+            "staged {} {}\ntransaction: {}\nlog: {}\nwork_dir: {}\nstage_root: {}\nmanifest: {}\narchive: {}\narchive_sha256: {}\narchive_size: {}\nentries: {}\n",
             report.package_name,
             report.version,
             report.transaction_id,
+            report.log_path.display(),
             report.work_dir.display(),
             report.stage_root.display(),
             report.manifest_path.display(),
@@ -1049,6 +1463,33 @@ impl App {
             report.package_archive_size,
             report.manifest_entries,
         )
+    }
+
+    pub fn format_cache_status_report(report: &CacheStatusReport) -> String {
+        let mut output = String::new();
+        let _ = writeln!(
+            output,
+            "cache {} {} {}",
+            report.status, report.package_name, report.version
+        );
+        let _ = writeln!(output, "recipe_hash: {}", report.recipe_hash);
+        if let Some(archive_path) = &report.archive_path {
+            let _ = writeln!(output, "archive: {}", archive_path.display());
+        }
+        if let Some(archive_sha256) = &report.archive_sha256 {
+            let _ = writeln!(output, "archive_sha256: {archive_sha256}");
+        }
+        if let Some(transaction_id) = report.build_transaction_id {
+            let _ = writeln!(output, "transaction: {transaction_id}");
+        }
+        output
+    }
+
+    fn build_log_path(&self, transaction_id: i64, package_name: &str) -> PathBuf {
+        self.paths.logs_dir.join("builds").join(format!(
+            "{transaction_id}-{}.log",
+            sanitize_log_name(package_name)
+        ))
     }
 
     pub fn format_repo_index_report(report: &BinaryRepoIndexReport) -> String {
@@ -1132,6 +1573,27 @@ impl App {
         output
     }
 
+    pub fn format_dependents_report(report: &DependentsReport) -> String {
+        let mut output = format!(
+            "dependents for {}\ntransitive: {}\npackages: {}\n",
+            report.package_name,
+            if report.transitive { "yes" } else { "no" },
+            report.packages.len()
+        );
+        for package in &report.packages {
+            let _ = writeln!(
+                output,
+                "- {} depth={} direct={} install_reason={} world_member={}",
+                package.package_name,
+                package.depth,
+                if package.direct { "yes" } else { "no" },
+                package.install_reason,
+                if package.world_member { "yes" } else { "no" },
+            );
+        }
+        output
+    }
+
     pub fn format_repo_export_report(report: &RepoExportReport) -> String {
         format!(
             "exported repo {}\nchannel: {}\nrevision: {}\noutput: {}\npackages: {}\nversions: {}\nfiles: {}\n",
@@ -1157,6 +1619,22 @@ impl App {
             report.package_count,
             report.version_count,
             report.file_count,
+            report.keep_revisions,
+        )
+    }
+
+    pub fn format_repo_promote_report(report: &RepoPromoteReport) -> String {
+        format!(
+            "promoted repo revision\nsource_repo: {}\nsource_channel: {}\nsource_revision: {}\nsource_published: {}\ntarget_repo: {}\ntarget_channel: {}\ntarget_revision: {}\ntarget_published: {}\ntarget_live: {}\nkeep_previous_revisions: {}\n",
+            report.source_repo_name,
+            report.source_channel,
+            report.source_revision,
+            report.source_published_root.display(),
+            report.target_repo_name,
+            report.target_channel,
+            report.target_revision,
+            report.target_published_root.display(),
+            report.target_live_root.display(),
             report.keep_revisions,
         )
     }
@@ -1840,6 +2318,7 @@ impl App {
             &actions,
         )?;
         update_transaction_status(&self.paths.database_path, transaction_id, "building")?;
+        let log_path = self.build_log_path(transaction_id, &package.package.name);
 
         let build_result = stage_package(
             package,
@@ -1847,6 +2326,7 @@ impl App {
             &self.paths.build_dir,
             &self.paths.packages_dir,
             transaction_id,
+            &log_path,
             &[],
         );
 
@@ -1894,6 +2374,25 @@ impl App {
                 Ok(())
             }
             Err(err) => {
+                let transaction_path = self
+                    .paths
+                    .transactions_dir
+                    .join(format!("{transaction_id}.json"));
+                let transaction_json = serde_json::to_vec_pretty(&json!({
+                    "transaction_id": transaction_id,
+                    "operation": operation,
+                    "package": {
+                        "name": package.package.name,
+                        "version": package.package.evr.to_string(),
+                    },
+                    "status": "failed",
+                    "log_path": log_path,
+                    "error": err.to_string(),
+                }))?;
+                fs::write(&transaction_path, transaction_json).map_err(|source| AppError::Io {
+                    path: transaction_path,
+                    source,
+                })?;
                 let _ =
                     update_transaction_status(&self.paths.database_path, transaction_id, "failed");
                 Err(AppError::from(err))
@@ -2004,6 +2503,7 @@ impl App {
             &actions,
         )?;
         update_transaction_status(&self.paths.database_path, transaction_id, "building")?;
+        let log_path = self.build_log_path(transaction_id, &package.package.name);
 
         let build_result = stage_package(
             package,
@@ -2011,6 +2511,7 @@ impl App {
             &self.paths.build_dir,
             &self.paths.packages_dir,
             transaction_id,
+            &log_path,
             extra_env,
         );
 
@@ -2061,6 +2562,27 @@ impl App {
                 Ok(report)
             }
             Err(err) => {
+                let transaction_path = self
+                    .paths
+                    .transactions_dir
+                    .join(format!("{transaction_id}.json"));
+                let transaction_json = serde_json::to_vec_pretty(&json!({
+                    "transaction_id": transaction_id,
+                    "operation": "bootstrap-build",
+                    "stage": stage_name,
+                    "package": {
+                        "name": package.package.name,
+                        "version": package.package.evr.to_string(),
+                    },
+                    "status": "failed",
+                    "extra_env": extra_env,
+                    "log_path": log_path,
+                    "error": err.to_string(),
+                }))?;
+                fs::write(&transaction_path, transaction_json).map_err(|source| AppError::Io {
+                    path: transaction_path,
+                    source,
+                })?;
                 let _ =
                     update_transaction_status(&self.paths.database_path, transaction_id, "failed");
                 Err(AppError::from(err))
@@ -2261,32 +2783,90 @@ impl App {
                 target_root: target_root.to_path_buf(),
                 packages: package_reports,
             };
-            let transaction_path = self
-                .paths
-                .transactions_dir
-                .join(format!("{transaction_id}.json"));
-            let transaction_json = serde_json::to_vec_pretty(&json!({
-                "transaction_id": transaction_id,
-                "operation": operation,
-                "requested": requested_json_value,
-                "report": &report,
-            }))?;
-            fs::write(&transaction_path, transaction_json).map_err(|source| AppError::Io {
-                path: transaction_path,
-                source,
-            })?;
             Ok(report)
         })();
 
         match transaction_result {
             Ok(report) => {
-                update_transaction_status(&self.paths.database_path, transaction_id, "complete")?;
+                self.write_transaction_report_record(
+                    operation,
+                    &requested_json_value,
+                    &report,
+                    "applied",
+                    "pending",
+                    None,
+                )?;
+                update_transaction_status(&self.paths.database_path, transaction_id, "applied")?;
                 Ok(report)
             }
             Err(err) => {
+                let _ = self.write_transaction_error_record(
+                    transaction_id,
+                    operation,
+                    &requested_json_value,
+                    "failed",
+                    "commit",
+                    &err.to_string(),
+                );
                 let _ =
                     update_transaction_status(&self.paths.database_path, transaction_id, "failed");
                 Err(err)
+            }
+        }
+    }
+
+    fn finalize_transaction(
+        &self,
+        report: TransactionReport,
+        target_root: &Path,
+        options: TransactionOptions,
+    ) -> Result<TransactionReport, AppError> {
+        update_transaction_status(
+            &self.paths.database_path,
+            report.transaction_id,
+            "maintaining",
+        )?;
+        self.update_transaction_report_record(
+            report.transaction_id,
+            "maintaining",
+            "running",
+            None,
+        )?;
+
+        match self.run_post_success_maintenance(target_root, options) {
+            Ok(()) => {
+                self.update_transaction_report_record(
+                    report.transaction_id,
+                    "complete",
+                    "complete",
+                    None,
+                )?;
+                update_transaction_status(
+                    &self.paths.database_path,
+                    report.transaction_id,
+                    "complete",
+                )?;
+                Ok(report)
+            }
+            Err(err) => {
+                let reason = err.to_string();
+                let transaction_path = self.transaction_record_path(report.transaction_id);
+                let _ = self.update_transaction_report_record(
+                    report.transaction_id,
+                    "maintenance-failed",
+                    "failed",
+                    Some(&reason),
+                );
+                let _ = update_transaction_status(
+                    &self.paths.database_path,
+                    report.transaction_id,
+                    "maintenance-failed",
+                );
+                Err(AppError::PostTransactionMaintenanceFailed {
+                    transaction_id: report.transaction_id,
+                    transaction_path,
+                    reason,
+                })
             }
         }
     }
@@ -2368,6 +2948,34 @@ impl App {
         Ok(())
     }
 
+    fn update_transaction_report_record(
+        &self,
+        transaction_id: i64,
+        status: &str,
+        maintenance_status: &str,
+        maintenance_error: Option<&str>,
+    ) -> Result<(), AppError> {
+        let transaction_path = self.transaction_record_path(transaction_id);
+        let contents = fs::read_to_string(&transaction_path).map_err(|source| AppError::Io {
+            path: transaction_path.clone(),
+            source,
+        })?;
+        let mut record = serde_json::from_str::<serde_json::Value>(&contents)?;
+        record["status"] = json!(status);
+        record["maintenance"] = json!({
+            "status": maintenance_status,
+        });
+        if let Some(error) = maintenance_error {
+            record["maintenance"]["error"] = json!(error);
+        }
+        let transaction_json = serde_json::to_vec_pretty(&record)?;
+        fs::write(&transaction_path, transaction_json).map_err(|source| AppError::Io {
+            path: transaction_path,
+            source,
+        })?;
+        Ok(())
+    }
+
     fn published_repo_root(&self, repo_name: &str) -> PathBuf {
         self.paths.published_repos_dir.join(sanitize(repo_name))
     }
@@ -2387,6 +2995,68 @@ impl App {
         let contents = toml::to_string_pretty(state)?;
         fs::write(&path, contents).map_err(|source| AppError::Io {
             path: path.clone(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    fn transaction_record_path(&self, transaction_id: i64) -> PathBuf {
+        self.paths
+            .transactions_dir
+            .join(format!("{transaction_id}.json"))
+    }
+
+    fn write_transaction_report_record(
+        &self,
+        operation: &str,
+        requested_json_value: &serde_json::Value,
+        report: &TransactionReport,
+        status: &str,
+        maintenance_status: &str,
+        maintenance_error: Option<&str>,
+    ) -> Result<(), AppError> {
+        let mut maintenance = json!({
+            "status": maintenance_status,
+        });
+        if let Some(error) = maintenance_error {
+            maintenance["error"] = json!(error);
+        }
+        let transaction_path = self.transaction_record_path(report.transaction_id);
+        let transaction_json = serde_json::to_vec_pretty(&json!({
+            "transaction_id": report.transaction_id,
+            "operation": operation,
+            "requested": requested_json_value,
+            "status": status,
+            "maintenance": maintenance,
+            "report": report,
+        }))?;
+        fs::write(&transaction_path, transaction_json).map_err(|source| AppError::Io {
+            path: transaction_path,
+            source,
+        })?;
+        Ok(())
+    }
+
+    fn write_transaction_error_record(
+        &self,
+        transaction_id: i64,
+        operation: &str,
+        requested_json_value: &serde_json::Value,
+        status: &str,
+        phase: &str,
+        error: &str,
+    ) -> Result<(), AppError> {
+        let transaction_path = self.transaction_record_path(transaction_id);
+        let transaction_json = serde_json::to_vec_pretty(&json!({
+            "transaction_id": transaction_id,
+            "operation": operation,
+            "requested": requested_json_value,
+            "status": status,
+            "phase": phase,
+            "error": error,
+        }))?;
+        fs::write(&transaction_path, transaction_json).map_err(|source| AppError::Io {
+            path: transaction_path,
             source,
         })?;
         Ok(())
@@ -2430,26 +3100,38 @@ impl App {
             }
             let repo_name = entry.file_name().to_string_lossy().to_string();
             if let Some(state) = self.read_publish_state(&repo_name)? {
-                states.push(state);
+                if state.remember {
+                    states.push(state);
+                }
             }
         }
         Ok(states)
     }
 
-    fn run_post_success_maintenance(&self, target_root: &Path) -> Result<(), AppError> {
+    fn run_post_success_maintenance(
+        &self,
+        target_root: &Path,
+        options: TransactionOptions,
+    ) -> Result<(), AppError> {
         self.refresh_root_runtime_state(target_root)?;
+        if options.skip_publish_maintenance {
+            return Ok(());
+        }
         let publish_states = self.list_publish_states()?;
         if publish_states.is_empty() {
             return Ok(());
         }
 
         for publish_state in publish_states {
-            self.publish_repo(
+            self.publish_repo_with_options(
                 Some(Path::new(&publish_state.source_root)),
                 Some(&publish_state.repo_name),
                 &publish_state.channel,
                 None,
                 publish_state.keep_revisions,
+                RepoPublishOptions {
+                    remember_publish_state: publish_state.remember,
+                },
             )?;
         }
         self.cleanup(CleanupTarget::All)?;
@@ -2554,6 +3236,10 @@ fn map_repo_export_report(report: UnifiedRepoExportReport) -> RepoExportReport {
     }
 }
 
+const fn publish_state_remember_default() -> bool {
+    true
+}
+
 const fn format_repo_trust_mode(mode: RepoTrustMode) -> &'static str {
     match mode {
         RepoTrustMode::Local => "local",
@@ -2628,7 +3314,10 @@ fn format_byte_count(bytes: u64) -> String {
 }
 
 fn transaction_status_allows_cleanup(status: &str) -> bool {
-    !matches!(status, "planned" | "building" | "committing")
+    !matches!(
+        status,
+        "planned" | "building" | "committing" | "applied" | "maintaining"
+    )
 }
 
 fn transaction_id_from_work_dir_name(name: &str) -> Option<i64> {
@@ -2637,6 +3326,18 @@ fn transaction_id_from_work_dir_name(name: &str) -> Option<i64> {
         return None;
     }
     suffix.parse().ok()
+}
+
+fn sanitize_log_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn path_size(path: &Path) -> Result<u64, AppError> {
@@ -3289,7 +3990,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use sha2::{Digest, Sha256};
-    use sloppkg_db::{create_transaction, list_installed_packages, update_transaction_status};
+    use sloppkg_db::{
+        create_transaction, list_installed_packages, list_transaction_statuses,
+        update_transaction_status,
+    };
     use sloppkg_types::{
         ManifestEntry, PackageManifest, RepoConfigEntry, RepoKind, RepoSyncStrategy, RepoTrustMode,
     };
@@ -3297,7 +4001,7 @@ mod tests {
     use super::{
         format_bootstrap_progress, installable_manifest, normalize_existing_path, normalize_prefix,
         path_within_prefix, render_progress_bar, App, AppError, AppPaths, BootstrapProgress,
-        CleanupTarget,
+        CleanupTarget, PublishState, RepoPublishOptions, TransactionOptions,
     };
 
     fn write_runtime_hook(path: &Path, body: &str) {
@@ -4213,6 +4917,471 @@ owned_prefixes = ["/usr/local"]
     }
 
     #[test]
+    fn dependents_report_tracks_direct_and_transitive_installed_dependents() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sloppkg-core-dependents-{unique}"));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let packages_root = repo_root.join("packages");
+        let target_root = root.join("target");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+
+        let shared_install = r#"[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/tool.sh\" \"$PKG_DESTDIR/usr/local/bin/PLACEHOLDER\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#;
+
+        write_test_package(
+            &packages_root,
+            "libalpha",
+            "0.1.0",
+            1,
+            &format!(
+                r#"[package]
+name = "libalpha"
+version = "0.1.0"
+release = 1
+summary = "libalpha"
+description = "libalpha"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "tool.sh"
+sha256 = "local"
+destination = "tool.sh"
+
+{}
+"#,
+                shared_install.replace("PLACEHOLDER", "libalpha")
+            ),
+            "#!/bin/sh\necho libalpha\n",
+        );
+        fs::write(
+            packages_root.join("libalpha/0.1.0-1").join("tool.sh"),
+            "#!/bin/sh\necho libalpha\n",
+        )
+        .unwrap();
+
+        write_test_package(
+            &packages_root,
+            "app-one",
+            "0.1.0",
+            1,
+            &format!(
+                r#"[package]
+name = "app-one"
+version = "0.1.0"
+release = 1
+summary = "app-one"
+description = "app-one"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "tool.sh"
+sha256 = "local"
+destination = "tool.sh"
+
+[[dependencies]]
+name = "libalpha"
+constraint = "*"
+kind = "runtime"
+
+{}
+"#,
+                shared_install.replace("PLACEHOLDER", "app-one")
+            ),
+            "#!/bin/sh\necho app-one\n",
+        );
+        fs::write(
+            packages_root.join("app-one/0.1.0-1").join("tool.sh"),
+            "#!/bin/sh\necho app-one\n",
+        )
+        .unwrap();
+
+        write_test_package(
+            &packages_root,
+            "app-two",
+            "0.1.0",
+            1,
+            &format!(
+                r#"[package]
+name = "app-two"
+version = "0.1.0"
+release = 1
+summary = "app-two"
+description = "app-two"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "tool.sh"
+sha256 = "local"
+destination = "tool.sh"
+
+[[dependencies]]
+name = "app-one"
+constraint = "*"
+kind = "runtime"
+
+{}
+"#,
+                shared_install.replace("PLACEHOLDER", "app-two")
+            ),
+            "#!/bin/sh\necho app-two\n",
+        );
+        fs::write(
+            packages_root.join("app-two/0.1.0-1").join("tool.sh"),
+            "#!/bin/sh\necho app-two\n",
+        )
+        .unwrap();
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+        app.install(Some(&repo_root), "app-two", "*", &target_root)
+            .unwrap();
+
+        let direct = app.dependents("libalpha", false).unwrap();
+        assert_eq!(direct.packages.len(), 1);
+        assert_eq!(direct.packages[0].package_name, "app-one");
+        assert!(direct.packages[0].direct);
+        assert_eq!(direct.packages[0].depth, 1);
+        assert_eq!(direct.packages[0].install_reason, "auto");
+        assert!(!direct.packages[0].world_member);
+
+        let transitive = app.dependents("libalpha", true).unwrap();
+        assert_eq!(
+            transitive
+                .packages
+                .iter()
+                .map(|package| package.package_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["app-one", "app-two"]
+        );
+        assert_eq!(transitive.packages[1].depth, 2);
+        assert_eq!(transitive.packages[1].install_reason, "explicit");
+        assert!(transitive.packages[1].world_member);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_status_reports_missing_ready_and_stale_recipe_matches() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sloppkg-core-cache-status-{unique}"));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let packages_root = repo_root.join("packages");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+        write_test_package(
+            &packages_root,
+            "hello-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "hello-tool"
+version = "0.1.0"
+release = 1
+summary = "hello tool"
+description = "hello tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "hello.txt"
+sha256 = "local"
+destination = "hello.txt"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/hello.txt\" \"$PKG_DESTDIR/usr/local/bin/hello-tool\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\necho first\n",
+        );
+        let hello_txt = packages_root.join("hello-tool/0.1.0-1/hello.txt");
+        fs::write(&hello_txt, "#!/bin/sh\necho first\n").unwrap();
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+
+        let missing = app
+            .cache_status(Some(&repo_root), "hello-tool", "*")
+            .unwrap();
+        assert_eq!(missing.status, "missing");
+        assert!(missing.archive_path.is_none());
+
+        let build = app.build(Some(&repo_root), "hello-tool", "*").unwrap();
+        let ready = app
+            .cache_status(Some(&repo_root), "hello-tool", "*")
+            .unwrap();
+        assert_eq!(ready.status, "ready");
+        assert_eq!(
+            normalize_existing_path(ready.archive_path.as_ref().unwrap()),
+            normalize_existing_path(&build.package_archive_path)
+        );
+        assert_eq!(
+            ready.archive_sha256.as_deref(),
+            Some(build.package_archive_sha256.as_str())
+        );
+
+        fs::write(&hello_txt, "#!/bin/sh\necho second\n").unwrap();
+        let stale = app
+            .cache_status(Some(&repo_root), "hello-tool", "*")
+            .unwrap();
+        assert_eq!(stale.status, "stale");
+        assert_eq!(
+            normalize_existing_path(stale.archive_path.as_ref().unwrap()),
+            normalize_existing_path(&build.package_archive_path)
+        );
+        assert_ne!(stale.recipe_hash, ready.recipe_hash);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_commit_failure_writes_failed_transaction_record() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sloppkg-core-commit-fail-{unique}"));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let packages_root = repo_root.join("packages");
+        let target_root = root.join("target");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+
+        write_test_package(
+            &packages_root,
+            "hello-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "hello-tool"
+version = "0.1.0"
+release = 1
+summary = "hello tool"
+description = "hello tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "hello.txt"
+sha256 = "local"
+destination = "hello.txt"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/hello.txt\" \"$PKG_DESTDIR/usr/local/bin/hello-tool\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\necho hello\n",
+        );
+        fs::write(
+            packages_root.join("hello-tool/0.1.0-1").join("hello.txt"),
+            "#!/bin/sh\necho hello\n",
+        )
+        .unwrap();
+
+        fs::create_dir_all(&target_root).unwrap();
+        fs::set_permissions(&target_root, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+        let err = app
+            .install(Some(&repo_root), "hello-tool", "*", &target_root)
+            .unwrap_err();
+        assert!(matches!(err, AppError::Io { .. }));
+
+        let statuses = list_transaction_statuses(&app.paths.database_path).unwrap();
+        assert_eq!(statuses.len(), 2);
+        let latest = statuses
+            .iter()
+            .max_by_key(|status| status.transaction_id)
+            .unwrap();
+        assert_eq!(latest.status, "failed");
+
+        let transaction_path = app
+            .paths
+            .transactions_dir
+            .join(format!("{}.json", latest.transaction_id));
+        let transaction = serde_json::from_str::<serde_json::Value>(
+            &fs::read_to_string(&transaction_path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transaction["status"], "failed");
+        assert_eq!(transaction["phase"], "commit");
+        assert!(transaction["error"]
+            .as_str()
+            .unwrap()
+            .contains("I/O failure"));
+
+        fs::set_permissions(&target_root, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_marks_transaction_when_post_success_maintenance_fails() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sloppkg-core-maintenance-transaction-fail-{unique}"
+        ));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let packages_root = repo_root.join("packages");
+        let target_root = root.join("target");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+
+        write_test_package(
+            &packages_root,
+            "hello-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "hello-tool"
+version = "0.1.0"
+release = 1
+summary = "hello tool"
+description = "hello tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "hello.txt"
+sha256 = "local"
+destination = "hello.txt"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/hello.txt\" \"$PKG_DESTDIR/usr/local/bin/hello-tool\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\necho hello\n",
+        );
+        fs::write(
+            packages_root.join("hello-tool/0.1.0-1").join("hello.txt"),
+            "#!/bin/sh\necho hello\n",
+        )
+        .unwrap();
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+        app.write_publish_state(
+            "workspace",
+            &PublishState {
+                repo_name: String::from("workspace"),
+                source_root: root.join("missing-repo").display().to_string(),
+                channel: String::from("stable"),
+                keep_revisions: 1,
+                remember: true,
+            },
+        )
+        .unwrap();
+
+        let err = app
+            .install(Some(&repo_root), "hello-tool", "*", &target_root)
+            .unwrap_err();
+        let (transaction_id, transaction_path, reason) = match err {
+            AppError::PostTransactionMaintenanceFailed {
+                transaction_id,
+                transaction_path,
+                reason,
+            } => (transaction_id, transaction_path, reason),
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(reason.contains("missing-repo"));
+        assert!(target_root.join("usr/local/bin/hello-tool").exists());
+
+        let statuses = list_transaction_statuses(&app.paths.database_path).unwrap();
+        let latest = statuses
+            .iter()
+            .max_by_key(|status| status.transaction_id)
+            .unwrap();
+        assert_eq!(latest.transaction_id, transaction_id);
+        assert_eq!(latest.status, "maintenance-failed");
+
+        let transaction = serde_json::from_str::<serde_json::Value>(
+            &fs::read_to_string(&transaction_path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transaction["status"], "maintenance-failed");
+        assert_eq!(transaction["maintenance"]["status"], "failed");
+        assert!(transaction["maintenance"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing-repo"));
+        assert_eq!(transaction["report"]["transaction_id"], transaction_id);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cleanup_builds_removes_terminal_transaction_dirs() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4680,6 +5849,301 @@ owned_prefixes = ["/usr/local"]
         assert_eq!(revision_count, 2);
         assert!(current_live.join("repo.toml").exists());
         assert!(current_live.join("recipes/index/stable.toml").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_remembered_publish_state_is_not_auto_republished() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("sloppkg-core-nonremember-publish-{unique}"));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let packages_root = repo_root.join("packages");
+        let target_root = root.join("target");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace-candidate\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+        write_test_package(
+            &packages_root,
+            "hello-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "hello-tool"
+version = "0.1.0"
+release = 1
+summary = "hello tool"
+description = "hello tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "hello.txt"
+sha256 = "local"
+destination = "hello.txt"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/hello.txt\" \"$PKG_DESTDIR/usr/local/bin/hello-tool\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\necho first\n",
+        );
+        fs::write(
+            packages_root.join("hello-tool/0.1.0-1/hello.txt"),
+            "#!/bin/sh\necho first\n",
+        )
+        .unwrap();
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+        app.publish_repo_with_options(
+            Some(&repo_root),
+            Some("workspace-candidate"),
+            "candidate",
+            Some("cand-001"),
+            1,
+            RepoPublishOptions {
+                remember_publish_state: false,
+            },
+        )
+        .unwrap();
+        let initial_live = normalize_existing_path(
+            &app.paths.published_repos_dir.join("workspace-candidate/live"),
+        );
+
+        fs::write(
+            packages_root.join("hello-tool/0.1.0-1/hello.txt"),
+            "#!/bin/sh\necho second\n",
+        )
+        .unwrap();
+        app.install(Some(&repo_root), "hello-tool", "*", &target_root)
+            .unwrap();
+
+        let live_root = app
+            .paths
+            .published_repos_dir
+            .join("workspace-candidate/live");
+        let current_live = normalize_existing_path(&live_root);
+        let revisions_root = app
+            .paths
+            .published_repos_dir
+            .join("workspace-candidate/revisions/candidate");
+        let revision_count = fs::read_dir(&revisions_root).unwrap().count();
+        let publish_state: toml::Value = toml::from_str(
+            &fs::read_to_string(
+                app.paths
+                    .published_repos_dir
+                    .join("workspace-candidate/publish.toml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(current_live, initial_live);
+        assert_eq!(revision_count, 1);
+        assert_eq!(publish_state["remember"].as_bool(), Some(false));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_can_skip_publish_maintenance() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sloppkg-core-skip-publish-{unique}"));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let packages_root = repo_root.join("packages");
+        let target_root = root.join("target");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+        write_test_package(
+            &packages_root,
+            "hello-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "hello-tool"
+version = "0.1.0"
+release = 1
+summary = "hello tool"
+description = "hello tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "hello.txt"
+sha256 = "local"
+destination = "hello.txt"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/hello.txt\" \"$PKG_DESTDIR/usr/local/bin/hello-tool\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\necho first\n",
+        );
+        fs::write(
+            packages_root.join("hello-tool/0.1.0-1/hello.txt"),
+            "#!/bin/sh\necho first\n",
+        )
+        .unwrap();
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+        app.write_publish_state(
+            "workspace",
+            &PublishState {
+                repo_name: String::from("workspace"),
+                source_root: root.join("missing-repo").display().to_string(),
+                channel: String::from("stable"),
+                keep_revisions: 1,
+                remember: true,
+            },
+        )
+        .unwrap();
+
+        app
+            .install_with_options(
+                Some(&repo_root),
+                "hello-tool",
+                "*",
+                &target_root,
+                TransactionOptions {
+                    skip_publish_maintenance: true,
+                },
+            )
+            .unwrap();
+
+        assert!(target_root.join("usr/local/bin/hello-tool").exists());
+
+        let statuses = list_transaction_statuses(&app.paths.database_path).unwrap();
+        let latest = statuses
+            .iter()
+            .max_by_key(|status| status.transaction_id)
+            .unwrap();
+        assert_eq!(latest.status, "complete");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn promote_repo_copies_exact_candidate_revision() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sloppkg-core-promote-repo-{unique}"));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let packages_root = repo_root.join("packages");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace-candidate\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+        write_test_package(
+            &packages_root,
+            "hello-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "hello-tool"
+version = "0.1.0"
+release = 1
+summary = "hello tool"
+description = "hello tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[build]
+system = "custom"
+out_of_tree = true
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\nset -euo pipefail\n",
+        );
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+        let candidate = app
+            .publish_repo_with_options(
+                Some(&repo_root),
+                Some("workspace-candidate"),
+                "candidate",
+                Some("cand-001"),
+                2,
+                RepoPublishOptions {
+                    remember_publish_state: false,
+                },
+            )
+            .unwrap();
+
+        let report = app
+            .promote_repo(
+                "workspace-candidate",
+                "candidate",
+                Some("cand-001"),
+                "workspace",
+                "stable",
+                2,
+            )
+            .unwrap();
+
+        let stable_live = app.paths.published_repos_dir.join("workspace/live");
+        let stable_publish: toml::Value = toml::from_str(
+            &fs::read_to_string(app.paths.published_repos_dir.join("workspace/publish.toml"))
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(report.source_revision, "cand-001");
+        assert_eq!(report.target_revision, "cand-001");
+        assert!(report.target_published_root.join("repo.toml").exists());
+        assert_eq!(
+            fs::read_to_string(candidate.published_root.join("repo.toml")).unwrap(),
+            fs::read_to_string(report.target_published_root.join("repo.toml")).unwrap()
+        );
+        assert_eq!(
+            normalize_existing_path(&stable_live),
+            normalize_existing_path(&report.target_published_root)
+        );
+        assert_eq!(stable_publish["remember"].as_bool(), Some(true));
 
         let _ = fs::remove_dir_all(root);
     }

@@ -1,0 +1,120 @@
+#!/bin/sh
+set -eu
+
+STATE_ROOT="${STATE_ROOT:-/Volumes/slopos-data/pkg}"
+GUEST_SLOPPKG_BIN="${GUEST_SLOPPKG_BIN:-/usr/local/bin/sloppkg}"
+SLOPOS_PUBLISH_HTTP_REPO="${SLOPOS_PUBLISH_HTTP_REPO:-/usr/sbin/slopos-publish-http-repo}"
+SOURCE_REPO_NAME="${SOURCE_REPO_NAME:-workspace-candidate}"
+SOURCE_CHANNEL="${SOURCE_CHANNEL:-candidate}"
+SOURCE_REVISION="${SOURCE_REVISION:-}"
+TARGET_REPO_NAME="${TARGET_REPO_NAME:-workspace}"
+TARGET_CHANNEL="${TARGET_CHANNEL:-stable}"
+KEEP_REVISIONS="${KEEP_REVISIONS:-1}"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: slopos-promote-rebuild [--source-name <name>] [--source-channel <name>] [--source-revision <name>] [--target-name <name>] [--target-channel <name>] [--keep-revisions <count>]
+
+Promote an already-published candidate revision into the stable repo view, then
+serve and refresh the promoted stable unified repo without re-exporting it from
+the current recipe tree.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source-name)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      SOURCE_REPO_NAME="$2"
+      shift 2
+      ;;
+    --source-channel)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      SOURCE_CHANNEL="$2"
+      shift 2
+      ;;
+    --source-revision)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      SOURCE_REVISION="$2"
+      shift 2
+      ;;
+    --target-name)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      TARGET_REPO_NAME="$2"
+      shift 2
+      ;;
+    --target-channel)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      TARGET_CHANNEL="$2"
+      shift 2
+      ;;
+    --keep-revisions)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      KEEP_REVISIONS="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ ! -x "$GUEST_SLOPPKG_BIN" ]; then
+  echo "Missing guest sloppkg binary: $GUEST_SLOPPKG_BIN" >&2
+  exit 1
+fi
+
+if [ ! -x "$SLOPOS_PUBLISH_HTTP_REPO" ]; then
+  echo "Missing publish helper: $SLOPOS_PUBLISH_HTTP_REPO" >&2
+  exit 1
+fi
+
+set -- \
+  "$GUEST_SLOPPKG_BIN" \
+  --state-root "$STATE_ROOT" \
+  repo promote \
+  --source-name "$SOURCE_REPO_NAME" \
+  --source-channel "$SOURCE_CHANNEL" \
+  --target-name "$TARGET_REPO_NAME" \
+  --target-channel "$TARGET_CHANNEL" \
+  --keep-revisions "$KEEP_REVISIONS"
+if [ -n "$SOURCE_REVISION" ]; then
+  set -- "$@" --source-revision "$SOURCE_REVISION"
+fi
+
+promote_output="$("$@" 2>&1)"
+printf '%s\n' "$promote_output"
+
+promoted_revision="$(
+  printf '%s\n' "$promote_output" | awk -F': ' '/^target_revision:/ { print $2; exit }'
+)"
+
+env \
+  REPO_NAME="$TARGET_REPO_NAME" \
+  CHANNEL="$TARGET_CHANNEL" \
+  REVISION="$promoted_revision" \
+  "$SLOPOS_PUBLISH_HTTP_REPO" --serve-only

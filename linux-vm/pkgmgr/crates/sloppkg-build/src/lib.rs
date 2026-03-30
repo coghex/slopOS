@@ -1,6 +1,8 @@
 use std::fs;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Read;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,14 +34,22 @@ pub enum BuildError {
         expected: String,
         actual: String,
     },
-    #[error("failed to fetch {url} into {path}")]
-    FetchCommandFailed { url: String, path: PathBuf },
+    #[error("failed to fetch {url} into {path}; see build log {log_path}")]
+    FetchCommandFailed {
+        url: String,
+        path: PathBuf,
+        log_path: PathBuf,
+    },
     #[error("unsupported source kind: {0}")]
     UnsupportedSourceKind(String),
     #[error("unsupported build system: {0}")]
     UnsupportedBuildSystem(String),
-    #[error("build command failed in {cwd}: {command}")]
-    CommandFailed { cwd: PathBuf, command: String },
+    #[error("build command failed in {cwd}: {command}; see build log {log_path}")]
+    CommandFailed {
+        cwd: PathBuf,
+        command: String,
+        log_path: PathBuf,
+    },
     #[error("recipe path has no parent: {0}")]
     InvalidRecipePath(PathBuf),
     #[error("build directory does not exist: {0}")]
@@ -55,6 +65,7 @@ pub struct BuildReport {
     pub transaction_id: i64,
     pub package_name: String,
     pub version: String,
+    pub log_path: PathBuf,
     pub work_dir: PathBuf,
     pub source_dir: PathBuf,
     pub build_dir: PathBuf,
@@ -91,6 +102,7 @@ pub fn stage_package(
     build_root: &Path,
     package_cache_root: &Path,
     transaction_id: i64,
+    log_path: &Path,
     extra_env: &[(String, String)],
 ) -> Result<BuildReport, BuildError> {
     let work_dir = build_root.join(format!(
@@ -120,7 +132,8 @@ pub fn stage_package(
         })?;
     }
 
-    materialize_sources(package, distfiles_dir, &source_root)?;
+    start_build_log(log_path, package, transaction_id, &work_dir)?;
+    materialize_sources(package, distfiles_dir, &source_root, log_path)?;
 
     let source_dir = resolve_source_dir(package, &source_root)?;
     let build_dir = if package.build.out_of_tree {
@@ -133,7 +146,18 @@ pub fn stage_package(
         source,
     })?;
 
-    run_build(package, &source_dir, &build_dir, &destdir, extra_env)?;
+    append_log_line(
+        log_path,
+        &format!("Resolved source directory: {}", source_dir.display()),
+    )?;
+    run_build(
+        package,
+        &source_dir,
+        &build_dir,
+        &destdir,
+        log_path,
+        extra_env,
+    )?;
 
     let manifest = build_manifest(package, &destdir)?;
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
@@ -149,7 +173,8 @@ pub fn stage_package(
         source,
     })?;
 
-    let package_archive_path = emit_binary_package(package, package_cache_root, &stage_root)?;
+    let package_archive_path =
+        emit_binary_package(package, package_cache_root, &stage_root, log_path)?;
     let package_archive_sha256 = hash_file(&package_archive_path)?;
     let package_archive_size = fs::metadata(&package_archive_path)
         .map_err(|source| BuildError::Io {
@@ -162,6 +187,7 @@ pub fn stage_package(
         transaction_id,
         package_name: package.package.name.clone(),
         version: package.package.evr.to_string(),
+        log_path: log_path.to_path_buf(),
         work_dir,
         source_dir,
         build_dir,
@@ -188,6 +214,7 @@ pub fn fetch_package_sources(
         path: distfiles_dir.to_path_buf(),
         source,
     })?;
+    let fetch_log_path = distfiles_dir.join("fetch.log");
 
     let mut entries = Vec::new();
     for source in &package.sources {
@@ -216,7 +243,7 @@ pub fn fetch_package_sources(
                 }
 
                 let cached_path = resolve_cached_source_path(source, distfiles_dir);
-                let action = ensure_remote_source_cached(source, &cached_path)?;
+                let action = ensure_remote_source_cached(source, &cached_path, &fetch_log_path)?;
                 let size = fs::metadata(&cached_path)
                     .map_err(|source| BuildError::Io {
                         path: cached_path.clone(),
@@ -246,7 +273,7 @@ pub fn fetch_package_sources(
                     continue;
                 }
                 let cached_path = resolve_cached_source_path(source, distfiles_dir);
-                let action = ensure_remote_source_cached(source, &cached_path)?;
+                let action = ensure_remote_source_cached(source, &cached_path, &fetch_log_path)?;
                 let size = fs::metadata(&cached_path)
                     .map_err(|source| BuildError::Io {
                         path: cached_path.clone(),
@@ -277,6 +304,7 @@ fn materialize_sources(
     package: &PackageRecord,
     distfiles_dir: &Path,
     source_root: &Path,
+    log_path: &Path,
 ) -> Result<(), BuildError> {
     let recipe_dir = package
         .recipe_path
@@ -284,6 +312,13 @@ fn materialize_sources(
         .ok_or_else(|| BuildError::InvalidRecipePath(package.recipe_path.clone()))?;
 
     if package.sources.is_empty() {
+        append_log_line(
+            log_path,
+            &format!(
+                "No explicit sources declared; copying recipe directory {}",
+                recipe_dir.display()
+            ),
+        )?;
         copy_dir_contents(recipe_dir, source_root)?;
         return Ok(());
     }
@@ -291,6 +326,10 @@ fn materialize_sources(
     for source in &package.sources {
         match source.kind.as_str() {
             "file" => {
+                append_log_line(
+                    log_path,
+                    &format!("Materializing file source {}", source.url),
+                )?;
                 let source_path = if resolve_local_source_path(source, recipe_dir).exists() {
                     resolve_local_source_path(source, recipe_dir)
                 } else if is_remote_url(&source.url) {
@@ -314,8 +353,20 @@ fn materialize_sources(
                     .unwrap_or_else(|| String::from("source"));
                 let destination = source_root.join(destination_name);
                 copy_path(&source_path, &destination)?;
+                append_log_line(
+                    log_path,
+                    &format!(
+                        "Copied file source {} -> {}",
+                        source_path.display(),
+                        destination.display()
+                    ),
+                )?;
             }
             "archive" => {
+                append_log_line(
+                    log_path,
+                    &format!("Materializing archive source {}", source.url),
+                )?;
                 let archive_path = if resolve_local_source_path(source, recipe_dir).exists() {
                     resolve_local_source_path(source, recipe_dir)
                 } else {
@@ -325,7 +376,12 @@ fn materialize_sources(
                     return Err(BuildError::MissingCachedSource(archive_path));
                 }
                 ensure_source_checksum(source, &archive_path)?;
-                extract_archive(&archive_path, source_root, source.strip_components)?;
+                extract_archive(
+                    &archive_path,
+                    source_root,
+                    source.strip_components,
+                    log_path,
+                )?;
             }
             other => return Err(BuildError::UnsupportedSourceKind(other.to_owned())),
         }
@@ -360,6 +416,7 @@ fn is_remote_url(url: &str) -> bool {
 fn ensure_remote_source_cached(
     source: &sloppkg_types::SourceSpec,
     cached_path: &Path,
+    log_path: &Path,
 ) -> Result<String, BuildError> {
     if source.sha256 == "local" {
         return Err(BuildError::UnverifiableRemoteSource(source.url.clone()));
@@ -375,7 +432,7 @@ fn ensure_remote_source_cached(
         })?;
     }
 
-    download_source(source, cached_path)?;
+    download_source(source, cached_path, log_path)?;
     ensure_source_checksum(source, cached_path)?;
     Ok(String::from("downloaded"))
 }
@@ -401,6 +458,7 @@ fn ensure_source_checksum(
 fn download_source(
     source: &sloppkg_types::SourceSpec,
     destination: &Path,
+    log_path: &Path,
 ) -> Result<(), BuildError> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|source| BuildError::Io {
@@ -408,6 +466,15 @@ fn download_source(
             source,
         })?;
     }
+
+    append_log_line(
+        log_path,
+        &format!(
+            "Fetching remote source {} -> {}",
+            source.url,
+            destination.display()
+        ),
+    )?;
 
     let tmp_path = destination.with_extension(format!(
         "{}.part",
@@ -464,12 +531,12 @@ tmp_path.replace(final_path)
     ];
 
     for (program, args) in attempts {
-        let status = match Command::new(program)
+        let output = match Command::new(program)
             .env("PATH", build_path())
             .args(&args)
-            .status()
+            .output()
         {
-            Ok(status) => status,
+            Ok(output) => output,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source_err) => {
                 return Err(BuildError::Io {
@@ -478,7 +545,15 @@ tmp_path.replace(final_path)
                 })
             }
         };
-        if !status.success() {
+        append_log_line(
+            log_path,
+            &format!("Attempting source fetch with {program}: {}", args.join(" ")),
+        )?;
+        append_log_bytes(log_path, &output.stdout)?;
+        append_log_bytes(log_path, &output.stderr)?;
+        let _ = std::io::stdout().write_all(&output.stdout);
+        let _ = std::io::stderr().write_all(&output.stderr);
+        if !output.status.success() {
             let _ = fs::remove_file(&tmp_path);
             continue;
         }
@@ -494,6 +569,7 @@ tmp_path.replace(final_path)
     Err(BuildError::FetchCommandFailed {
         url: source.url.clone(),
         path: destination.to_path_buf(),
+        log_path: log_path.to_path_buf(),
     })
 }
 
@@ -528,6 +604,7 @@ fn run_build(
     source_dir: &Path,
     build_dir: &Path,
     destdir: &Path,
+    log_path: &Path,
     extra_env: &[(String, String)],
 ) -> Result<(), BuildError> {
     let jobs = package.build.jobs.max(
@@ -558,6 +635,10 @@ fn run_build(
         ),
         (String::from("BUILD_JOBS"), jobs.to_string()),
         (String::from("PATH"), build_path()),
+        (
+            String::from("SLOPPKG_BUILD_LOG_PATH"),
+            log_path.display().to_string(),
+        ),
     ];
     envs.extend(package.build.env.iter().cloned());
     envs.extend(extra_env.iter().cloned());
@@ -565,10 +646,10 @@ fn run_build(
     match package.build.system.as_str() {
         "custom" => {
             for command in &package.build.build {
-                run_shell(command, build_dir, &envs)?;
+                run_shell(command, build_dir, log_path, &envs)?;
             }
             for command in &package.build.install {
-                run_shell(command, build_dir, &envs)?;
+                run_shell(command, build_dir, log_path, &envs)?;
             }
         }
         "gnu" => {
@@ -579,21 +660,26 @@ fn run_build(
                 configure.push(' ');
                 configure.push_str(&package.build.configure.join(" "));
             }
-            run_shell(&configure, build_dir, &envs)?;
+            run_shell(&configure, build_dir, log_path, &envs)?;
 
             if package.build.build.is_empty() {
-                run_shell("make -j\"$BUILD_JOBS\"", build_dir, &envs)?;
+                run_shell("make -j\"$BUILD_JOBS\"", build_dir, log_path, &envs)?;
             } else {
                 for command in &package.build.build {
-                    run_shell(command, build_dir, &envs)?;
+                    run_shell(command, build_dir, log_path, &envs)?;
                 }
             }
 
             if package.build.install.is_empty() {
-                run_shell("make DESTDIR=\"$PKG_DESTDIR\" install", build_dir, &envs)?;
+                run_shell(
+                    "make DESTDIR=\"$PKG_DESTDIR\" install",
+                    build_dir,
+                    log_path,
+                    &envs,
+                )?;
             } else {
                 for command in &package.build.install {
-                    run_shell(command, build_dir, &envs)?;
+                    run_shell(command, build_dir, log_path, &envs)?;
                 }
             }
         }
@@ -612,11 +698,19 @@ fn build_path() -> String {
     }
 }
 
-fn run_shell(command: &str, cwd: &Path, envs: &[(String, String)]) -> Result<(), BuildError> {
+fn run_shell(
+    command: &str,
+    cwd: &Path,
+    log_path: &Path,
+    envs: &[(String, String)],
+) -> Result<(), BuildError> {
+    append_log_line(log_path, "")?;
+    append_log_line(log_path, &format!(">>> cwd: {}", cwd.display()))?;
+    append_log_line(log_path, &format!(">>> command: {command}"))?;
     let mut process = Command::new("/bin/bash");
-    process
-        .arg("-c")
-        .arg(format!("set -euo pipefail; {command}"));
+    process.arg("-c").arg(format!(
+        "set -euo pipefail; ({command}) 2>&1 | tee -a \"$SLOPPKG_BUILD_LOG_PATH\""
+    ));
     process.current_dir(cwd);
     for (key, value) in envs {
         process.env(key, value);
@@ -629,6 +723,7 @@ fn run_shell(command: &str, cwd: &Path, envs: &[(String, String)]) -> Result<(),
         return Err(BuildError::CommandFailed {
             cwd: cwd.to_path_buf(),
             command: command.to_owned(),
+            log_path: log_path.to_path_buf(),
         });
     }
     Ok(())
@@ -773,6 +868,7 @@ fn emit_binary_package(
     package: &PackageRecord,
     package_cache_root: &Path,
     stage_root: &Path,
+    log_path: &Path,
 ) -> Result<PathBuf, BuildError> {
     let arch = package
         .package
@@ -804,6 +900,7 @@ fn emit_binary_package(
             .arg("root"),
         stage_root,
         format!("tar archive for {}", package.package.name),
+        log_path,
     )?;
 
     compress_file(&tar_path, &archive_path)?;
@@ -864,35 +961,111 @@ fn extract_archive(
     archive: &Path,
     destination: &Path,
     strip_components: usize,
+    log_path: &Path,
 ) -> Result<(), BuildError> {
     let mut command = Command::new("tar");
     command.arg("-xf").arg(archive).arg("-C").arg(destination);
     if strip_components > 0 {
         command.arg(format!("--strip-components={strip_components}"));
     }
-    let status = command.status().map_err(|source| BuildError::Io {
-        path: archive.to_path_buf(),
+    run_command(
+        &mut command,
+        destination,
+        format!("tar extract {}", archive.display()),
+        log_path,
+    )
+}
+
+fn run_command(
+    command: &mut Command,
+    cwd: &Path,
+    label: String,
+    log_path: &Path,
+) -> Result<(), BuildError> {
+    append_log_line(log_path, "")?;
+    append_log_line(log_path, &format!(">>> cwd: {}", cwd.display()))?;
+    append_log_line(log_path, &format!(">>> command: {label}"))?;
+    let output = command.output().map_err(|source| BuildError::Io {
+        path: cwd.to_path_buf(),
         source,
     })?;
-    if !status.success() {
+    append_log_bytes(log_path, &output.stdout)?;
+    append_log_bytes(log_path, &output.stderr)?;
+    let _ = std::io::stdout().write_all(&output.stdout);
+    let _ = std::io::stderr().write_all(&output.stderr);
+    if !output.status.success() {
         return Err(BuildError::CommandFailed {
-            cwd: destination.to_path_buf(),
-            command: format!("tar -xf {} -C {}", archive.display(), destination.display()),
+            cwd: cwd.to_path_buf(),
+            command: label,
+            log_path: log_path.to_path_buf(),
         });
     }
     Ok(())
 }
 
-fn run_command(command: &mut Command, cwd: &Path, label: String) -> Result<(), BuildError> {
-    let status = command.status().map_err(|source| BuildError::Io {
-        path: cwd.to_path_buf(),
+fn start_build_log(
+    log_path: &Path,
+    package: &PackageRecord,
+    transaction_id: i64,
+    work_dir: &Path,
+) -> Result<(), BuildError> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| BuildError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::write(
+        log_path,
+        format!(
+            "sloppkg build log\ntransaction_id: {transaction_id}\npackage: {}\nversion: {}\nwork_dir: {}\n",
+            package.package.name,
+            package.package.evr,
+            work_dir.display()
+        ),
+    )
+    .map_err(|source| BuildError::Io {
+        path: log_path.to_path_buf(),
+        source,
+    })
+}
+
+fn append_log_line(log_path: &Path, line: &str) -> Result<(), BuildError> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|source| BuildError::Io {
+            path: log_path.to_path_buf(),
+            source,
+        })?;
+    writeln!(file, "{line}").map_err(|source| BuildError::Io {
+        path: log_path.to_path_buf(),
+        source,
+    })
+}
+
+fn append_log_bytes(log_path: &Path, bytes: &[u8]) -> Result<(), BuildError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|source| BuildError::Io {
+            path: log_path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(bytes).map_err(|source| BuildError::Io {
+        path: log_path.to_path_buf(),
         source,
     })?;
-    if !status.success() {
-        return Err(BuildError::CommandFailed {
-            cwd: cwd.to_path_buf(),
-            command: label,
-        });
+    if !bytes.ends_with(b"\n") {
+        file.write_all(b"\n").map_err(|source| BuildError::Io {
+            path: log_path.to_path_buf(),
+            source,
+        })?;
     }
     Ok(())
 }
@@ -1065,6 +1238,7 @@ mod tests {
 
         let package_cache_root = root.join("packages");
         std::fs::create_dir_all(&package_cache_root).unwrap();
+        let log_path = root.join("logs").join("hello-stage.log");
 
         let report = stage_package(
             &package,
@@ -1072,9 +1246,11 @@ mod tests {
             &build_root,
             &package_cache_root,
             1,
+            &log_path,
             &[],
         )
         .unwrap();
+        assert!(report.log_path.exists());
         assert!(report.manifest_path.exists());
         let manifest = std::fs::read_to_string(&report.manifest_path).unwrap();
         assert!(manifest.contains("/usr/local/bin/hello-stage"));
@@ -1152,6 +1328,7 @@ mod tests {
 
         let package_cache_root = root.join("packages");
         std::fs::create_dir_all(&package_cache_root).unwrap();
+        let log_path = root.join("logs").join("override.log");
 
         let report = stage_package(
             &package,
@@ -1159,6 +1336,7 @@ mod tests {
             &build_root,
             &package_cache_root,
             2,
+            &log_path,
             &[(String::from("OVERRIDE_ME"), String::from("stage"))],
         )
         .unwrap();
@@ -1238,6 +1416,7 @@ mod tests {
 
         let package_cache_root = root.join("packages");
         std::fs::create_dir_all(&package_cache_root).unwrap();
+        let log_path = root.join("logs").join("path-capture.log");
 
         let report = stage_package(
             &package,
@@ -1245,14 +1424,15 @@ mod tests {
             &build_root,
             &package_cache_root,
             1,
+            &log_path,
             &[],
         )
         .unwrap();
-        let path_value = std::fs::read_to_string(report.destdir.join("usr/local/share/path.txt"))
-            .unwrap();
-        assert!(path_value.starts_with(
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        ));
+        let path_value =
+            std::fs::read_to_string(report.destdir.join("usr/local/share/path.txt")).unwrap();
+        assert!(
+            path_value.starts_with("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

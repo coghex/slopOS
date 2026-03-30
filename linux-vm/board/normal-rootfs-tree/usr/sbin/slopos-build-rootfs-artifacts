@@ -1,0 +1,340 @@
+#!/bin/sh
+set -eu
+
+PERSISTENT_MOUNTPOINT="${PERSISTENT_MOUNTPOINT:-/Volumes/slopos-data}"
+ROOTFS_STATE_ROOT="${ROOTFS_STATE_ROOT:-$PERSISTENT_MOUNTPOINT/rootfs}"
+ROOTFS_INPUT_ROOT="${ROOTFS_INPUT_ROOT:-$ROOTFS_STATE_ROOT/input/current}"
+BASE_ROOTFS_ARCHIVE="${BASE_ROOTFS_ARCHIVE:-}"
+ROOTFS_POST_FAKEROOT_SCRIPT="${ROOTFS_POST_FAKEROOT_SCRIPT:-$ROOTFS_INPUT_ROOT/normal-post-fakeroot.sh}"
+DEFCONFIG_PATH="${DEFCONFIG_PATH:-$ROOTFS_INPUT_ROOT/slopos_aarch64_virt_defconfig}"
+BOOTSTRAP_MANIFEST_PATH="${BOOTSTRAP_MANIFEST_PATH:-$ROOTFS_INPUT_ROOT/bootstrap-manifest.toml}"
+ROOTFS_SIZE="${ROOTFS_SIZE:-}"
+ROOTFS_LABEL="${ROOTFS_LABEL:-}"
+WORK_ROOT="${WORK_ROOT:-$ROOTFS_STATE_ROOT/build}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-$ROOTFS_STATE_ROOT/artifacts}"
+LOG_ROOT="${LOG_ROOT:-$ROOTFS_STATE_ROOT/logs}"
+LOCK_DIR="${LOCK_DIR:-$ROOTFS_STATE_ROOT/locks/build-rootfs.lock}"
+KEEP_WORKDIR=0
+LOCK_ACQUIRED=0
+CURRENT_PHASE="initializing"
+BUILD_LOG=""
+TEMP_DIR=""
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: slopos-build-rootfs-artifacts [--base-archive <path>] [--input-root <path>] [--size <ext4-size>] [--label <label>] [--keep-workdir]
+
+Builds a guest-native ext4 rootfs image from a staged Buildroot base tree plus
+the repo-owned normal seed inputs under /Volumes/slopos-data/rootfs.
+EOF
+}
+
+require_exec() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required tool: $1" >&2
+    exit 1
+  fi
+}
+
+extract_tar_archive() {
+  archive_path="$1"
+  output_dir="$2"
+  python3 - "$archive_path" "$output_dir" <<'PY'
+import pathlib
+import sys
+import tarfile
+
+archive_path = pathlib.Path(sys.argv[1])
+output_dir = pathlib.Path(sys.argv[2])
+output_dir.mkdir(parents=True, exist_ok=True)
+with tarfile.open(archive_path, "r:") as archive:
+    try:
+        archive.extractall(output_dir, filter="fully_trusted")
+    except TypeError:
+        archive.extractall(output_dir)
+PY
+}
+
+create_tar_archive() {
+  source_dir="$1"
+  archive_path="$2"
+  python3 - "$source_dir" "$archive_path" <<'PY'
+import pathlib
+import sys
+import tarfile
+
+source_dir = pathlib.Path(sys.argv[1])
+archive_path = pathlib.Path(sys.argv[2])
+with tarfile.open(archive_path, "w") as archive:
+    archive.add(source_dir, arcname=".")
+PY
+}
+
+supports_mke2fs_populate_dir() {
+  help_output="$(mke2fs --help 2>&1 || true)"
+  case "$help_output" in
+    *" -d "*|*"[-d "*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base-archive)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      BASE_ROOTFS_ARCHIVE="$2"
+      shift 2
+      ;;
+    --input-root)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      ROOTFS_INPUT_ROOT="$2"
+      shift 2
+      ;;
+    --size)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      ROOTFS_SIZE="$2"
+      shift 2
+      ;;
+    --label)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      ROOTFS_LABEL="$2"
+      shift 2
+      ;;
+    --keep-workdir)
+      KEEP_WORKDIR=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$BASE_ROOTFS_ARCHIVE" ]; then
+  if set -- "$ROOTFS_INPUT_ROOT"/base-rootfs.tar*; [ -f "$1" ]; then
+    BASE_ROOTFS_ARCHIVE="$1"
+  else
+    echo "Unable to locate base rootfs archive under $ROOTFS_INPUT_ROOT" >&2
+    exit 1
+  fi
+fi
+
+for tool in bash python3 tar sha256sum sed awk find chown mke2fs file; do
+  require_exec "$tool"
+done
+
+for path in "$BASE_ROOTFS_ARCHIVE" "$ROOTFS_POST_FAKEROOT_SCRIPT" "$DEFCONFIG_PATH" "$BOOTSTRAP_MANIFEST_PATH"; do
+  if [ ! -e "$path" ]; then
+    echo "Missing required rootfs input: $path" >&2
+    exit 1
+  fi
+done
+
+if [ -z "$ROOTFS_LABEL" ]; then
+  ROOTFS_LABEL="$(sed -n 's/^BR2_TARGET_ROOTFS_EXT2_LABEL="\(.*\)"/\1/p' "$DEFCONFIG_PATH")"
+fi
+
+if [ -z "$ROOTFS_SIZE" ]; then
+  ROOTFS_SIZE="$(sed -n 's/^BR2_TARGET_ROOTFS_EXT2_SIZE="\(.*\)"/\1/p' "$DEFCONFIG_PATH")"
+fi
+
+if [ -z "$ROOTFS_LABEL" ] || [ -z "$ROOTFS_SIZE" ]; then
+  echo "Unable to resolve rootfs label/size from $DEFCONFIG_PATH" >&2
+  exit 1
+fi
+
+timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+mkdir -p "$WORK_ROOT" "$ARTIFACT_ROOT" "$LOG_ROOT" "$(dirname "$LOCK_DIR")"
+BUILD_LOG="$LOG_ROOT/${timestamp}-$$.log"
+touch "$BUILD_LOG"
+
+log_line() {
+  printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$BUILD_LOG"
+}
+
+set_phase() {
+  CURRENT_PHASE="$1"
+  log_line "phase $1"
+}
+
+run_logged() {
+  step="$1"
+  shift
+  echo "==> $step"
+  log_line "run: $step"
+  if ! "$@" >>"$BUILD_LOG" 2>&1; then
+    echo "Rootfs artifact build failed during: $step" >&2
+    echo "build_log: $BUILD_LOG" >&2
+    tail -n 40 "$BUILD_LOG" >&2 || true
+    exit 1
+  fi
+}
+
+acquire_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_ACQUIRED=1
+    printf '%s\n' "$$" >"$LOCK_DIR/pid"
+    return 0
+  fi
+
+  stale_pid=""
+  if [ -f "$LOCK_DIR/pid" ]; then
+    stale_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  fi
+  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      LOCK_ACQUIRED=1
+      printf '%s\n' "$$" >"$LOCK_DIR/pid"
+      return 0
+    fi
+  fi
+
+  echo "Another rootfs build is already running for $ROOTFS_STATE_ROOT" >&2
+  if [ -n "$stale_pid" ]; then
+    echo "Lock owner pid: $stale_pid" >&2
+  fi
+  exit 1
+}
+
+cleanup() {
+  status=$?
+  if [ "$LOCK_ACQUIRED" = "1" ]; then
+    rm -rf "$LOCK_DIR"
+  fi
+  if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+    if [ "$status" -eq 0 ] && [ "$KEEP_WORKDIR" != "1" ]; then
+      rm -rf "$TEMP_DIR"
+    else
+      echo "work_dir: $TEMP_DIR" >&2
+    fi
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT HUP INT TERM
+acquire_lock
+
+TEMP_DIR="$WORK_ROOT/${timestamp}-$$"
+STAGE_ROOT="$TEMP_DIR/rootfs"
+mkdir -p "$STAGE_ROOT"
+
+set_phase "extract"
+run_logged "Extracting staged base rootfs tree" extract_tar_archive "$BASE_ROOTFS_ARCHIVE" "$STAGE_ROOT"
+run_logged "Normalizing extracted rootfs ownership" chown -R 0:0 "$STAGE_ROOT"
+
+set_phase "assemble"
+run_logged "Applying normal rootfs assembly hook" bash "$ROOTFS_POST_FAKEROOT_SCRIPT" "$STAGE_ROOT"
+run_logged "Cleaning transient run directory" sh -c "find '$STAGE_ROOT/run' -mindepth 1 -prune -print0 2>/dev/null | xargs -0r rm -rf --"
+run_logged "Cleaning transient tmp directory" sh -c "find '$STAGE_ROOT/tmp' -mindepth 1 -prune -print0 2>/dev/null | xargs -0r rm -rf --"
+
+set_phase "package"
+ARTIFACT_ID="rootfs-${timestamp}"
+ARTIFACT_DIR="$ARTIFACT_ROOT/$ARTIFACT_ID"
+mkdir -p "$ARTIFACT_DIR/inputs"
+ROOTFS_IMAGE="$ARTIFACT_DIR/rootfs.ext4"
+ROOTFS_TREE_ARCHIVE="$ARTIFACT_DIR/rootfs-tree.tar"
+SEAL_REQUIRED=1
+SEAL_METHOD="host-required"
+IMAGE_FILE_OUTPUT=""
+
+run_logged "Archiving assembled rootfs tree" create_tar_archive "$STAGE_ROOT" "$ROOTFS_TREE_ARCHIVE"
+
+if supports_mke2fs_populate_dir; then
+  set_phase "seal"
+  run_logged \
+    "Sealing rootfs.ext4 with in-guest mke2fs -d" \
+    mke2fs -t ext4 -d "$STAGE_ROOT" -N 0 -m 5 -L "$ROOTFS_LABEL" -I 256 -O '^64bit' "$ROOTFS_IMAGE" "$ROOTFS_SIZE"
+  if [ ! -s "$ROOTFS_IMAGE" ]; then
+    echo "Built rootfs image is missing or empty: $ROOTFS_IMAGE" >&2
+    exit 1
+  fi
+  IMAGE_FILE_OUTPUT="$(file "$ROOTFS_IMAGE" | sed 's/"/\\"/g')"
+  SEAL_REQUIRED=0
+  SEAL_METHOD="guest-mke2fs-d"
+fi
+
+run_logged "Recording staged base archive" cp "$BASE_ROOTFS_ARCHIVE" "$ARTIFACT_DIR/inputs/$(basename "$BASE_ROOTFS_ARCHIVE")"
+run_logged "Recording defconfig" cp "$DEFCONFIG_PATH" "$ARTIFACT_DIR/inputs/$(basename "$DEFCONFIG_PATH")"
+run_logged "Recording bootstrap manifest" cp "$BOOTSTRAP_MANIFEST_PATH" "$ARTIFACT_DIR/inputs/$(basename "$BOOTSTRAP_MANIFEST_PATH")"
+
+if [ -d "$ROOTFS_INPUT_ROOT/normal-rootfs-tree" ]; then
+  run_logged "Recording normal seed tree" cp -a "$ROOTFS_INPUT_ROOT/normal-rootfs-tree" "$ARTIFACT_DIR/inputs/normal-rootfs-tree"
+fi
+
+if [ -d "$ROOTFS_INPUT_ROOT/rootfs-overlay" ]; then
+  run_logged "Recording mutable rootfs overlay" cp -a "$ROOTFS_INPUT_ROOT/rootfs-overlay" "$ARTIFACT_DIR/inputs/rootfs-overlay"
+fi
+
+set_phase "validate"
+if [ ! -s "$ROOTFS_TREE_ARCHIVE" ]; then
+  echo "Built rootfs tree archive is missing or empty: $ROOTFS_TREE_ARCHIVE" >&2
+  exit 1
+fi
+
+BASE_SHA="$(sha256sum "$BASE_ROOTFS_ARCHIVE" | awk '{print $1}')"
+DEFCONFIG_SHA="$(sha256sum "$DEFCONFIG_PATH" | awk '{print $1}')"
+BOOTSTRAP_SHA="$(sha256sum "$BOOTSTRAP_MANIFEST_PATH" | awk '{print $1}')"
+TREE_SHA="$(sha256sum "$ROOTFS_TREE_ARCHIVE" | awk '{print $1}')"
+
+cat >"$ARTIFACT_DIR/manifest.toml" <<EOF
+schema_version = 1
+artifact_id = "$ARTIFACT_ID"
+built_at = "$timestamp"
+rootfs_label = "$ROOTFS_LABEL"
+rootfs_size = "$ROOTFS_SIZE"
+base_archive = "$(basename "$BASE_ROOTFS_ARCHIVE")"
+base_archive_sha256 = "$BASE_SHA"
+source_defconfig = "$(basename "$DEFCONFIG_PATH")"
+source_defconfig_sha256 = "$DEFCONFIG_SHA"
+bootstrap_manifest = "$(basename "$BOOTSTRAP_MANIFEST_PATH")"
+bootstrap_manifest_sha256 = "$BOOTSTRAP_SHA"
+assembled_tree_archive = "$(basename "$ROOTFS_TREE_ARCHIVE")"
+assembled_tree_archive_sha256 = "$TREE_SHA"
+seal_method = "$SEAL_METHOD"
+seal_required = $( [ "$SEAL_REQUIRED" -eq 0 ] && printf 'false' || printf 'true' )
+image_name = "rootfs.ext4"
+build_log = "$BUILD_LOG"
+artifact_root = "$ARTIFACT_DIR"
+EOF
+
+if [ -n "$IMAGE_FILE_OUTPUT" ]; then
+  printf 'image_file = "%s"\n' "$IMAGE_FILE_OUTPUT" >>"$ARTIFACT_DIR/manifest.toml"
+fi
+
+ln -sfn "$ARTIFACT_ID" "$ARTIFACT_ROOT/current"
+set_phase "complete"
+log_line "rootfs artifact build complete"
+
+echo "Guest-native rootfs artifacts built."
+echo "  artifact_id: $ARTIFACT_ID"
+echo "  rootfs_label: $ROOTFS_LABEL"
+echo "  rootfs_size: $ROOTFS_SIZE"
+echo "  assembled_tree_archive: $ROOTFS_TREE_ARCHIVE"
+if [ "$SEAL_REQUIRED" -eq 0 ]; then
+  echo "  rootfs_image: $ROOTFS_IMAGE"
+fi
+echo "  seal_method: $SEAL_METHOD"
+echo "  artifact_root: $ARTIFACT_DIR"
+echo "  current_root: $ARTIFACT_ROOT/current"
+echo "  build_log: $BUILD_LOG"

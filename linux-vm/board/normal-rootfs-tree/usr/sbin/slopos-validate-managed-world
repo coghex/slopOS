@@ -1,0 +1,342 @@
+#!/bin/sh
+set -eu
+
+STATE_ROOT="${STATE_ROOT:-/Volumes/slopos-data/pkg}"
+PERSISTENT_MOUNTPOINT="${PERSISTENT_MOUNTPOINT:-/Volumes/slopos-data}"
+GUEST_SLOPPKG_BIN="${GUEST_SLOPPKG_BIN:-/usr/local/bin/sloppkg}"
+SLOPOS_PUBLISH_HTTP_REPO="${SLOPOS_PUBLISH_HTTP_REPO:-/usr/sbin/slopos-publish-http-repo}"
+GUEST_HTTP_REPO_PORT="${GUEST_HTTP_REPO_PORT:-18083}"
+GUEST_HTTP_REPO_BIND="${GUEST_HTTP_REPO_BIND:-127.0.0.1}"
+GUEST_HTTP_REPO_URL="${GUEST_HTTP_REPO_URL:-http://$GUEST_HTTP_REPO_BIND:$GUEST_HTTP_REPO_PORT}"
+SELFHOST_FINAL_BIN="${SELFHOST_FINAL_BIN:-$PERSISTENT_MOUNTPOINT/toolchain/selfhost-sysroot/final/bin}"
+MANAGED_BIN_DIR="${MANAGED_BIN_DIR:-/usr/local/bin}"
+MANAGED_SBIN_DIR="${MANAGED_SBIN_DIR:-/usr/local/sbin}"
+VALIDATION_SCRIPT_ROOT="${VALIDATION_SCRIPT_ROOT:-/}"
+VALIDATION_LOG_DIR="${VALIDATION_LOG_DIR:-$STATE_ROOT/logs/validations}"
+ROOT_BLOCK_DEVICE="${ROOT_BLOCK_DEVICE:-/dev/vda}"
+DATA_BLOCK_DEVICE="${DATA_BLOCK_DEVICE:-/dev/vdb}"
+WORLD_TARGET="${WORLD_TARGET:-${CANONICAL_WORLD_TARGET:-selfhost-world}}"
+CURRENT_PHASE="initializing"
+VALIDATION_LOG=""
+TEMP_DIR=""
+VALIDATE_BUILD=1
+VALIDATE_NETWORK=1
+VALIDATE_RUNTIME=1
+VALIDATE_PERL_TOOLS=1
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: slopos-validate-managed-world [--world-target <name>]
+
+  --world-target <name>  Select the managed profile to validate.
+
+Supported targets:
+  selfhost-base       runtime + util-linux baseline
+  selfhost-network    runtime + util-linux + networking
+  selfhost-devel      runtime + util-linux + build tools
+  selfhost-toolchain  runtime + util-linux + build tools
+  selfhost-world      runtime + util-linux + build tools + networking
+EOF
+}
+
+set_phase() {
+  CURRENT_PHASE="$1"
+}
+
+log_line() {
+  timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf '[%s] %s\n' "$timestamp" "$*" >>"$VALIDATION_LOG"
+}
+
+cleanup() {
+  status=$?
+  if [ -n "$TEMP_DIR" ]; then
+    if mountpoint -q "$TEMP_DIR/mount-dst" >/dev/null 2>&1; then
+      umount "$TEMP_DIR/mount-dst" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$TEMP_DIR"
+  fi
+  if [ -n "$VALIDATION_LOG" ]; then
+    if [ "$status" -eq 0 ]; then
+      log_line "validation complete"
+    else
+      log_line "validation failed during phase: $CURRENT_PHASE"
+      echo "Managed-world validation failed during phase: $CURRENT_PHASE" >&2
+      echo "validation_log: $VALIDATION_LOG" >&2
+    fi
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT HUP INT TERM
+
+resolve_path() {
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+require_exec() {
+  path="$1"
+  label="$2"
+  if [ ! -x "$path" ]; then
+    echo "Missing executable $label: $path" >&2
+    exit 1
+  fi
+}
+
+require_dir() {
+  path="$1"
+  label="$2"
+  if [ ! -d "$path" ]; then
+    echo "Missing directory $label: $path" >&2
+    exit 1
+  fi
+}
+
+require_command_prefix() {
+  command_name="$1"
+  shift
+  resolved="$(command -v "$command_name" 2>/dev/null || true)"
+  if [ -z "$resolved" ]; then
+    echo "Missing command: $command_name" >&2
+    exit 1
+  fi
+  resolved="$(resolve_path "$resolved")"
+  for prefix in "$@"; do
+    case "$resolved" in
+      "$prefix"|"$prefix"/*)
+        return 0
+        ;;
+    esac
+  done
+  echo "Command $command_name does not resolve to an expected managed path: $resolved" >&2
+  exit 1
+}
+
+run_logged() {
+  label="$1"
+  shift
+  log_line "run $label: $*"
+  "$@" >>"$VALIDATION_LOG" 2>&1
+}
+
+run_shell_logged() {
+  label="$1"
+  command_text="$2"
+  log_line "run $label: $command_text"
+  sh -c "$command_text" >>"$VALIDATION_LOG" 2>&1
+}
+
+create_temp_state() {
+  TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/slopos-validate-managed-world.XXXXXX")"
+  mkdir -p "$TEMP_DIR/runtime/extract" "$TEMP_DIR/build" "$TEMP_DIR/mount-src" "$TEMP_DIR/mount-dst"
+}
+
+configure_validation_groups() {
+  case "$WORLD_TARGET" in
+    selfhost-base)
+      VALIDATE_RUNTIME=1
+      VALIDATE_BUILD=0
+      VALIDATE_NETWORK=0
+      VALIDATE_PERL_TOOLS=0
+      ;;
+    selfhost-network)
+      VALIDATE_RUNTIME=1
+      VALIDATE_BUILD=0
+      VALIDATE_NETWORK=1
+      VALIDATE_PERL_TOOLS=0
+      ;;
+    selfhost-devel)
+      VALIDATE_RUNTIME=1
+      VALIDATE_BUILD=1
+      VALIDATE_NETWORK=0
+      VALIDATE_PERL_TOOLS=1
+      ;;
+    selfhost-toolchain)
+      VALIDATE_RUNTIME=1
+      VALIDATE_BUILD=1
+      VALIDATE_NETWORK=0
+      VALIDATE_PERL_TOOLS=0
+      ;;
+    selfhost-world)
+      VALIDATE_RUNTIME=1
+      VALIDATE_BUILD=1
+      VALIDATE_NETWORK=1
+      VALIDATE_PERL_TOOLS=1
+      ;;
+    *)
+      VALIDATE_RUNTIME=1
+      VALIDATE_BUILD=1
+      VALIDATE_NETWORK=1
+      VALIDATE_PERL_TOOLS=1
+      ;;
+  esac
+}
+
+runtime_command_checks() {
+  for command_name in bash less nano gzip tar ls cp mv rm head tail sort tr basename dirname realpath uptime dash curl; do
+    require_command_prefix "$command_name" "$MANAGED_BIN_DIR" "$MANAGED_SBIN_DIR"
+  done
+  for command_name in mount umount mountpoint findmnt blkid agetty; do
+    require_command_prefix "$command_name" "$MANAGED_BIN_DIR" "$MANAGED_SBIN_DIR"
+  done
+}
+
+build_command_checks() {
+  for command_name in make file; do
+    require_command_prefix "$command_name" "$MANAGED_BIN_DIR" "$MANAGED_SBIN_DIR"
+  done
+  if [ "$VALIDATE_PERL_TOOLS" = "1" ]; then
+    for command_name in perl prove pod2man; do
+      require_command_prefix "$command_name" "$MANAGED_BIN_DIR" "$MANAGED_SBIN_DIR"
+    done
+  fi
+  for command_name in gcc cc g++; do
+    require_command_prefix "$command_name" "$SELFHOST_FINAL_BIN"
+  done
+}
+
+network_command_checks() {
+  for command_name in ip ss ping traceroute nc wget telnet curl; do
+    require_command_prefix "$command_name" "$MANAGED_BIN_DIR" "$MANAGED_SBIN_DIR"
+  done
+}
+
+validate_runtime() {
+  echo "==> Validating shell/runtime and util-linux surface"
+  set_phase "runtime"
+  log_line "phase runtime"
+  runtime_command_checks
+  require_dir "$PERSISTENT_MOUNTPOINT" "persistent mountpoint"
+
+  printf 'hello-managed-world\n' >"$TEMP_DIR/runtime/input.txt"
+  run_logged "bash-version" bash --version
+  run_logged "less-version" less --version
+  run_logged "nano-version" nano --version
+  run_shell_logged "gzip-roundtrip" "gzip -c '$TEMP_DIR/runtime/input.txt' > '$TEMP_DIR/runtime/input.txt.gz' && gzip -dc '$TEMP_DIR/runtime/input.txt.gz' > '$TEMP_DIR/runtime/output.txt' && test \"\$(cat '$TEMP_DIR/runtime/input.txt')\" = \"\$(cat '$TEMP_DIR/runtime/output.txt')\""
+  run_shell_logged "tar-roundtrip" "tar -cf '$TEMP_DIR/runtime/archive.tar' -C '$TEMP_DIR/runtime' input.txt output.txt && tar -xf '$TEMP_DIR/runtime/archive.tar' -C '$TEMP_DIR/runtime/extract' && test \"\$(cat '$TEMP_DIR/runtime/input.txt')\" = \"\$(cat '$TEMP_DIR/runtime/extract/input.txt')\""
+  run_shell_logged "coreutils-smoke" "cp '$TEMP_DIR/runtime/input.txt' '$TEMP_DIR/runtime/copy.txt' && mv '$TEMP_DIR/runtime/copy.txt' '$TEMP_DIR/runtime/moved.txt' && ls '$TEMP_DIR/runtime' >/dev/null && head -n 1 '$TEMP_DIR/runtime/moved.txt' >/dev/null && tail -n 1 '$TEMP_DIR/runtime/moved.txt' >/dev/null && printf 'b\na\n' | sort | tr '\n' ',' >/dev/null && basename '$TEMP_DIR/runtime/moved.txt' >/dev/null && dirname '$TEMP_DIR/runtime/moved.txt' >/dev/null && realpath '$TEMP_DIR/runtime/moved.txt' >/dev/null && uptime >/dev/null && rm -f '$TEMP_DIR/runtime/moved.txt'"
+  run_logged "dash-syntax-audit" \
+    dash -n \
+    "$VALIDATION_SCRIPT_ROOT/init" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/rcS" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/rcK" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S11persistent-disk" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S12ssh-setup" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S13toolchain-links" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S14persistent-dropbear" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S15local-lib-links" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S16persistent-sloppkg" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S17persistent-getty" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S18devtmpfs-policy" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S19persistent-sh" \
+    "$VALIDATION_SCRIPT_ROOT/etc/init.d/S20managed-userland-links" \
+    "$VALIDATION_SCRIPT_ROOT/etc/profile.d/00-managed-path.sh"
+  run_logged "findmnt-persistent" findmnt "$PERSISTENT_MOUNTPOINT"
+  run_logged "blkid-devices" blkid "$ROOT_BLOCK_DEVICE" "$DATA_BLOCK_DEVICE"
+  printf 'bind-test\n' >"$TEMP_DIR/mount-src/file.txt"
+  run_logged "bind-mount" mount --bind "$TEMP_DIR/mount-src" "$TEMP_DIR/mount-dst"
+  run_logged "mountpoint-check" mountpoint -q "$TEMP_DIR/mount-dst"
+  run_logged "findmnt-bind" findmnt "$TEMP_DIR/mount-dst"
+  run_shell_logged "bind-mounted-file" "test -f '$TEMP_DIR/mount-dst/file.txt'"
+  run_logged "bind-umount" umount "$TEMP_DIR/mount-dst"
+  run_logged "agetty-help" agetty --help
+}
+
+validate_build_tools() {
+  echo "==> Validating build-tool surface"
+  set_phase "build-tools"
+  log_line "phase build-tools"
+  build_command_checks
+
+  cat >"$TEMP_DIR/build/hello.c" <<'EOF'
+#include <stdio.h>
+
+int main(void) {
+    puts("hello-from-managed-world");
+    return 0;
+}
+EOF
+  cat >"$TEMP_DIR/build/Makefile" <<'EOF'
+CC ?= gcc
+CFLAGS ?=
+
+all: hello
+
+hello: hello.c
+	$(CC) $(CFLAGS) hello.c -o hello
+EOF
+  run_logged "sloppkg-doctor" "$GUEST_SLOPPKG_BIN" --state-root "$STATE_ROOT" doctor
+  run_logged "make-build" make -C "$TEMP_DIR/build"
+  run_logged "hello-exec" "$TEMP_DIR/build/hello"
+  run_shell_logged "hello-output-check" "'$TEMP_DIR/build/hello' | grep -q '^hello-from-managed-world$'"
+  run_shell_logged "file-check" "file '$TEMP_DIR/build/hello' | grep -qi 'ELF'"
+  if [ "$VALIDATE_PERL_TOOLS" = "1" ]; then
+    run_logged "perl-smoke" perl -MExtUtils::MakeMaker -e 'print qq(perl-ok\n)'
+    run_logged "prove-version" prove --version
+    run_logged "pod2man-help" pod2man --help
+  fi
+}
+
+validate_network() {
+  echo "==> Validating networking surface"
+  set_phase "network"
+  log_line "phase network"
+  network_command_checks
+  require_exec "$SLOPOS_PUBLISH_HTTP_REPO" "publish helper"
+
+  run_logged "publish-http-repo" "$SLOPOS_PUBLISH_HTTP_REPO"
+  run_logged "ip-brief-link" ip -brief link
+  run_logged "ss-listeners" ss -ltn
+  run_logged "ping-loopback" ping -c 1 127.0.0.1
+  run_logged "traceroute-loopback" traceroute -n -m 1 127.0.0.1
+  run_shell_logged "wget-repo" "wget -qO- '$GUEST_HTTP_REPO_URL/repo.toml' | grep -q '^name = '"
+  run_logged "curl-repo" curl -fsS "$GUEST_HTTP_REPO_URL/repo.toml"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --world-target)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      WORLD_TARGET="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+mkdir -p "$VALIDATION_LOG_DIR"
+VALIDATION_LOG="$VALIDATION_LOG_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.log"
+log_line "validation start"
+log_line "world_target: $WORLD_TARGET"
+log_line "repo_url: $GUEST_HTTP_REPO_URL"
+create_temp_state
+configure_validation_groups
+
+if [ "$VALIDATE_RUNTIME" = "1" ]; then
+  validate_runtime
+fi
+if [ "$VALIDATE_BUILD" = "1" ]; then
+  validate_build_tools
+fi
+if [ "$VALIDATE_NETWORK" = "1" ]; then
+  validate_network
+fi
+
+set_phase "complete"
+echo "Managed-world validation passed."
+echo "  world_target: $WORLD_TARGET"
+echo "  runtime_checks: $VALIDATE_RUNTIME"
+echo "  build_checks: $VALIDATE_BUILD"
+echo "  network_checks: $VALIDATE_NETWORK"
+echo "  validation_log: $VALIDATION_LOG"

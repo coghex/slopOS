@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OVERLAY_SSH_DIR="$ROOT_DIR/board/rootfs-overlay/root/.ssh"
-AUTHORIZED_KEYS_FILE="$OVERLAY_SSH_DIR/authorized_keys"
+MUTABLE_SEED_SSH_DIR="$ROOT_DIR/board/rootfs-overlay/root/.ssh"
+AUTHORIZED_KEYS_FILE="$MUTABLE_SEED_SSH_DIR/authorized_keys"
 IDENTITY_PATH_FILE="$ROOT_DIR/qemu/guest-ssh-identity.path"
 
 pick_public_key() {
@@ -44,9 +44,9 @@ if [[ ! -f "$PRIVATE_KEY_FILE" ]]; then
   exit 1
 fi
 
-mkdir -p "$OVERLAY_SSH_DIR" "$ROOT_DIR/qemu"
+mkdir -p "$MUTABLE_SEED_SSH_DIR" "$ROOT_DIR/qemu"
 install -m 600 "$PUBLIC_KEY_FILE" "$AUTHORIZED_KEYS_FILE"
-chmod 700 "$OVERLAY_SSH_DIR"
+chmod 700 "$MUTABLE_SEED_SSH_DIR"
 printf '%s\n' "$PRIVATE_KEY_FILE" > "$IDENTITY_PATH_FILE"
 
 echo "Prepared guest SSH access with public key: $PUBLIC_KEY_FILE"

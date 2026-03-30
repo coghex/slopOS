@@ -2,7 +2,9 @@ use std::env;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use sloppkg_core::{App, AppPaths, CleanupTarget, RepoSummary};
+use sloppkg_core::{
+    App, AppPaths, CleanupTarget, RepoPublishOptions, RepoSummary, TransactionOptions,
+};
 use sloppkg_types::{RepoConfigEntry, RepoKind, RepoSyncStrategy, RepoTrustMode};
 
 #[derive(Parser, Debug)]
@@ -25,6 +27,8 @@ enum Command {
     Cleanup(CleanupArgs),
     Fetch(FetchArgs),
     Resolve(ResolveArgs),
+    Dependents(DependentsArgs),
+    CacheStatus(CacheStatusArgs),
     Build(BuildArgs),
     Install(InstallArgs),
     Upgrade(UpgradeArgs),
@@ -37,6 +41,24 @@ enum Command {
 
 #[derive(Args, Debug)]
 struct ResolveArgs {
+    packages: Vec<String>,
+    #[arg(long, default_value = "*")]
+    constraint: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct DependentsArgs {
+    package: String,
+    #[arg(long)]
+    transitive: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct CacheStatusArgs {
     package: String,
     #[arg(long, default_value = "*")]
     constraint: String,
@@ -86,6 +108,8 @@ struct InstallArgs {
     #[arg(long, default_value = "/")]
     root: PathBuf,
     #[arg(long)]
+    skip_publish_maintenance: bool,
+    #[arg(long)]
     json: bool,
 }
 
@@ -93,6 +117,8 @@ struct InstallArgs {
 struct UpgradeArgs {
     #[arg(long, default_value = "/")]
     root: PathBuf,
+    #[arg(long)]
+    skip_publish_maintenance: bool,
     #[arg(long)]
     json: bool,
 }
@@ -103,6 +129,8 @@ struct RemoveArgs {
     #[arg(long, default_value = "/")]
     root: PathBuf,
     #[arg(long)]
+    skip_publish_maintenance: bool,
+    #[arg(long)]
     json: bool,
 }
 
@@ -112,6 +140,7 @@ enum RepoCommand {
     Add(RepoAddArgs),
     Export(RepoExportArgs),
     Publish(RepoPublishArgs),
+    Promote(RepoPromoteArgs),
     Index(RepoIndexArgs),
 }
 
@@ -161,6 +190,26 @@ struct RepoPublishArgs {
     channel: String,
     #[arg(long)]
     revision: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    keep_revisions: usize,
+    #[arg(long)]
+    no_remember: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct RepoPromoteArgs {
+    #[arg(long)]
+    source_name: String,
+    #[arg(long, default_value = "stable")]
+    source_channel: String,
+    #[arg(long)]
+    source_revision: Option<String>,
+    #[arg(long)]
+    target_name: String,
+    #[arg(long, default_value = "stable")]
+    target_channel: String,
     #[arg(long, default_value_t = 1)]
     keep_revisions: usize,
     #[arg(long)]
@@ -291,11 +340,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Resolve(args) => {
-            let plan = app.resolve(recipe_root.as_deref(), &args.package, &args.constraint)?;
+            let plan =
+                app.resolve_many(recipe_root.as_deref(), &args.packages, &args.constraint)?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&plan_to_json(&plan))?);
             } else {
                 print!("{}", App::format_plan(&plan));
+            }
+        }
+        Command::Dependents(args) => {
+            let report = app.dependents(&args.package, args.transitive)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", App::format_dependents_report(&report));
+            }
+        }
+        Command::CacheStatus(args) => {
+            let report =
+                app.cache_status(recipe_root.as_deref(), &args.package, &args.constraint)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", App::format_cache_status_report(&report));
             }
         }
         Command::Build(args) => {
@@ -307,11 +374,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Install(args) => {
-            let report = app.install(
+            let report = app.install_with_options(
                 recipe_root.as_deref(),
                 &args.package,
                 &args.constraint,
                 &args.root,
+                TransactionOptions {
+                    skip_publish_maintenance: args.skip_publish_maintenance,
+                },
             )?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -320,7 +390,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Upgrade(args) => {
-            let report = app.upgrade(recipe_root.as_deref(), &args.root)?;
+            let report = app.upgrade_with_options(
+                recipe_root.as_deref(),
+                &args.root,
+                TransactionOptions {
+                    skip_publish_maintenance: args.skip_publish_maintenance,
+                },
+            )?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -328,7 +404,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Remove(args) => {
-            let report = app.remove(&args.package, &args.root)?;
+            let report = app.remove_with_options(
+                &args.package,
+                &args.root,
+                TransactionOptions {
+                    skip_publish_maintenance: args.skip_publish_maintenance,
+                },
+            )?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -399,17 +481,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::Repo {
             command: RepoCommand::Publish(args),
         } => {
-            let report = app.publish_repo(
+            let report = app.publish_repo_with_options(
                 recipe_root.as_deref(),
                 args.name.as_deref(),
                 &args.channel,
                 args.revision.as_deref(),
                 args.keep_revisions,
+                RepoPublishOptions {
+                    remember_publish_state: !args.no_remember,
+                },
             )?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", App::format_repo_publish_report(&report));
+            }
+        }
+        Command::Repo {
+            command: RepoCommand::Promote(args),
+        } => {
+            let report = app.promote_repo(
+                &args.source_name,
+                &args.source_channel,
+                args.source_revision.as_deref(),
+                &args.target_name,
+                &args.target_channel,
+                args.keep_revisions,
+            )?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", App::format_repo_promote_report(&report));
             }
         }
     }
