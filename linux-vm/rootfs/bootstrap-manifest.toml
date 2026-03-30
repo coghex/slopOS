@@ -161,6 +161,7 @@ notes = [
   "scripts/promote-guest-boot-default.sh copies the current host-side guest rootfs and kernel candidates into artifacts/guest-boot-promoted/current without overwriting the Buildroot outputs.",
   "ensure-root-disk.sh and run-phase2.sh treat that promoted current path as the default normal boot source unless the caller provides explicit ROOTFS_SOURCE_IMAGE or KERNEL_IMAGE overrides.",
   "scripts/promote-guest-boot-default.sh --clear removes the current promoted default and returns default selection to the Buildroot artifacts.",
+  "scripts/validate-promoted-boot-rollback.sh can point HOST_GUEST_PROMOTED_BOOT_ROOT at an isolated temporary promotion root to prove that clearing a promotion returns default boot selection to the Buildroot artifacts without mutating the live promoted state.",
 ]
 
 [stage0]

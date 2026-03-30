@@ -156,6 +156,7 @@ This disk is used for large durable state that is convenient to keep separate fr
 - `scripts/validate-guest-combined-boot-candidate.sh`
 - `scripts/promote-guest-boot-default.sh`
 - `scripts/validate-promoted-boot-default.sh`
+- `scripts/validate-promoted-boot-rollback.sh`
 
 These build a native AArch64 toolchain inside the guest, using the persistent data disk for sources, build trees, and install roots.
 
@@ -1150,7 +1151,10 @@ and `Image` by default whenever the caller does not provide explicit
 explicit boot overrides and proves from the boot log that the promoted default
 pair was selected. `scripts/promote-guest-boot-default.sh --clear` removes the
 current promoted symlink and returns default selection to the Buildroot rootfs
-and kernel artifacts.
+and kernel artifacts. `scripts/validate-promoted-boot-rollback.sh` uses an
+isolated temporary `HOST_GUEST_PROMOTED_BOOT_ROOT`, proves the promoted pair
+boots as the default, clears that isolated promotion, and then proves a fresh
+no-override boot falls back to `artifacts/buildroot-output/images/`.
 
 ## System ownership boundary
 
