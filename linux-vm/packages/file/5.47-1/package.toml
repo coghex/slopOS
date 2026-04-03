@@ -14,16 +14,16 @@ url = "https://astron.com/pub/file/file-5.47.tar.gz"
 sha256 = "45672fec165cb4cc1358a2d76b5d57d22876dcb97ab169427ac385cbe1d5597a"
 strip_components = 1
 
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
 [build]
-system = "gnu"
+system = "custom"
 out_of_tree = true
-configure = [
-  "--prefix=/usr/local",
-  "--disable-bzlib",
-  "--disable-libseccomp",
-  "--enable-zlib",
-  "--enable-xzlib",
-]
+install = ["bash \"$PKG_SOURCE_DIR/support/build.sh\""]
 
 [build.env]
 ac_cv_prog_cc_c99 = "-std=gnu99"

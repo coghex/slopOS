@@ -10,16 +10,18 @@ GUEST_RECIPE_ROOT="${GUEST_RECIPE_ROOT:-}"
 PUBLISH_ONLY=0
 SKIP_PUBLISH=0
 SKIP_PUBLISH_MAINTENANCE=0
+REQUIRE_READY_CACHE=0
 
 usage() {
   cat >&2 <<'EOF'
-Usage: slopos-sync-world [--install-target <package>] [--publish-only] [--skip-publish] [--recipe-root <path>] [--skip-publish-maintenance]
+Usage: slopos-sync-world [--install-target <package>] [--publish-only] [--skip-publish] [--recipe-root <path>] [--skip-publish-maintenance] [--require-ready-cache]
 
   --install-target <package>  Install a named target instead of upgrading the current world set.
   --publish-only              Refresh the guest unified repo and snapshot, but do not run install/upgrade.
   --skip-publish              Reuse an already refreshed guest repo instead of publishing again.
   --recipe-root <path>        Load packages directly from a recipe tree for convergence/testing.
   --skip-publish-maintenance  Skip remembered repo republish after successful root transactions.
+  --require-ready-cache       Fail if install/upgrade would need a source rebuild instead of a ready cached archive.
 
 When no world packages are recorded yet, the default upgrade path bootstraps
 the canonical target from CANONICAL_WORLD_TARGET (default: selfhost-world).
@@ -54,6 +56,10 @@ while [ $# -gt 0 ]; do
       ;;
     --skip-publish-maintenance)
       SKIP_PUBLISH_MAINTENANCE=1
+      shift
+      ;;
+    --require-ready-cache)
+      REQUIRE_READY_CACHE=1
       shift
       ;;
     -h|--help)
@@ -95,6 +101,9 @@ install_or_upgrade_args=""
 if [ "$SKIP_PUBLISH_MAINTENANCE" = "1" ]; then
   install_or_upgrade_args="--skip-publish-maintenance"
 fi
+if [ "$REQUIRE_READY_CACHE" = "1" ]; then
+  install_or_upgrade_args="$install_or_upgrade_args --require-ready-cache"
+fi
 
 if [ -n "$WORLD_TARGET" ]; then
   exec "$@" install "$WORLD_TARGET" --root / $install_or_upgrade_args
@@ -105,9 +114,9 @@ if "$@" upgrade --root / $install_or_upgrade_args >"$upgrade_log" 2>&1; then
   cat "$upgrade_log"
   rm -f "$upgrade_log"
   exit 0
+else
+  upgrade_status=$?
 fi
-
-upgrade_status=$?
 if grep -Fq "no world packages are recorded" "$upgrade_log"; then
   rm -f "$upgrade_log"
   echo "No recorded world state; bootstrapping canonical target: $CANONICAL_WORLD_TARGET" >&2

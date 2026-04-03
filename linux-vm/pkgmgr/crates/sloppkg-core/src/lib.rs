@@ -160,6 +160,8 @@ pub enum AppError {
     PackageNotInstalled(String),
     #[error("no world packages are recorded")]
     NoWorldPackages,
+    #[error("package cache is not ready for {package}: {status}")]
+    CacheNotReady { package: String, status: String },
     #[error("bootstrap installs currently require target_root=/, got {0}")]
     UnsupportedBootstrapTargetRoot(PathBuf),
     #[error("bootstrap package {package} has invalid metadata: {reason}")]
@@ -334,6 +336,7 @@ impl Default for RepoPublishOptions {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TransactionOptions {
     pub skip_publish_maintenance: bool,
+    pub require_ready_cache: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1261,7 +1264,13 @@ impl App {
         let requested_names = HashSet::from([package_name.to_owned()]);
         self.run_requested_bootstraps(&packages, &plan, &requested_names, target_root)?;
         let installed = installed_package_map(list_installed_packages(&self.paths.database_path)?);
-        let prepared = self.prepare_install_operations(&plan, &requested_names, &installed)?;
+        let prepared = self.prepare_install_operations(
+            &plan,
+            &requested_names,
+            &installed,
+            target_root,
+            options,
+        )?;
         let report = self.execute_transaction(
             "install-cache",
             vec![package_name.to_owned()],
@@ -1385,7 +1394,13 @@ impl App {
             .map(|entry| entry.package_name.clone())
             .collect::<HashSet<_>>();
         self.run_requested_bootstraps(&packages, &plan, &requested_names, target_root)?;
-        let prepared = self.prepare_install_operations(&plan, &requested_names, &installed)?;
+        let prepared = self.prepare_install_operations(
+            &plan,
+            &requested_names,
+            &installed,
+            target_root,
+            options,
+        )?;
         let selected_names = plan
             .packages
             .iter()
@@ -2287,10 +2302,40 @@ impl App {
         &self,
         package: &PackageRecord,
         requested: bool,
+        require_ready_cache: bool,
     ) -> Result<(), AppError> {
         let recipe_hash = recipe_source_hash(package)?;
         if self.cached_package_matches_recipe(package, &recipe_hash)? {
             return Ok(());
+        }
+
+        if require_ready_cache {
+            let arch = package
+                .package
+                .architectures
+                .first()
+                .cloned()
+                .unwrap_or_else(|| String::from("any"));
+            let records = find_cache_packages(
+                &self.paths.database_path,
+                &package.package.name,
+                package.package.evr.epoch,
+                &package.package.evr.version,
+                &package.package.evr.release,
+                &arch,
+            )?;
+            let status = if records
+                .into_iter()
+                .any(|record| Path::new(&record.archive_path).exists())
+            {
+                "stale"
+            } else {
+                "missing"
+            };
+            return Err(AppError::CacheNotReady {
+                package: package.package.name.clone(),
+                status: status.to_owned(),
+            });
         }
 
         let operation = if requested {
@@ -2595,6 +2640,8 @@ impl App {
         plan: &TransactionPlan,
         requested_names: &HashSet<String>,
         installed: &HashMap<String, InstalledPackageRecord>,
+        target_root: &Path,
+        options: TransactionOptions,
     ) -> Result<Vec<PreparedInstall>, AppError> {
         let mut prepared = Vec::new();
         for planned in &plan.packages {
@@ -2612,12 +2659,19 @@ impl App {
                 })
                 .unwrap_or(false);
             if same_version && !requested {
-                continue;
+                let root_drifted = installed_paths_missing_from_root(
+                    &self.paths.database_path,
+                    &name,
+                    target_root,
+                )?;
+                if !root_drifted {
+                    continue;
+                }
             }
 
             let exact_constraint =
                 Constraint::parse(&format!("= {}", planned.package.package.evr))?;
-            self.ensure_cached_package(&planned.package, requested)?;
+            self.ensure_cached_package(&planned.package, requested, options.require_ready_cache)?;
             let cached =
                 find_cached_binary_package(&self.paths.packages_dir, &name, &exact_constraint)?;
             let manifest = installable_manifest(&cached.manifest, &cached.info.owned_prefixes)?;
@@ -3727,6 +3781,20 @@ fn remove_paths_from_root(paths: &[String], target_root: &Path) -> Result<(), Ap
     Ok(())
 }
 
+fn installed_paths_missing_from_root(
+    database_path: &Path,
+    package_name: &str,
+    target_root: &Path,
+) -> Result<bool, AppError> {
+    for path in list_installed_files_for_package(database_path, package_name)? {
+        let target = root_path(target_root, &path);
+        if !path_exists(&target) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn cleanup_empty_parent_dirs(
     mut current: Option<&Path>,
     target_root: &Path,
@@ -4807,6 +4875,131 @@ owned_prefixes = ["/usr/local"]
     }
 
     #[test]
+    fn upgrade_reinstalls_same_version_dependency_when_target_root_drifted() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sloppkg-core-upgrade-drift-{unique}"));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let packages_root = repo_root.join("packages");
+        let target_root = root.join("target");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::create_dir_all(&target_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+
+        write_test_package(
+            &packages_root,
+            "dep-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "dep-tool"
+version = "0.1.0"
+release = 1
+summary = "dependency tool"
+description = "dependency tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "dep-tool.sh"
+sha256 = "local"
+destination = "dep-tool.sh"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/dep-tool.sh\" \"$PKG_DESTDIR/usr/local/bin/dep-tool\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\necho dependency\n",
+        );
+        fs::write(
+            packages_root.join("dep-tool/0.1.0-1").join("dep-tool.sh"),
+            "#!/bin/sh\necho dependency\n",
+        )
+        .unwrap();
+
+        write_test_package(
+            &packages_root,
+            "world-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "world-tool"
+version = "0.1.0"
+release = 1
+summary = "world tool"
+description = "world tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "world-tool.sh"
+sha256 = "local"
+destination = "world-tool.sh"
+
+[[dependencies]]
+name = "dep-tool"
+constraint = "*"
+kind = "runtime"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/world-tool.sh\" \"$PKG_DESTDIR/usr/local/bin/world-tool\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\necho world\n",
+        );
+        fs::write(
+            packages_root.join("world-tool/0.1.0-1").join("world-tool.sh"),
+            "#!/bin/sh\necho world\n",
+        )
+        .unwrap();
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+        app.install(Some(&repo_root), "world-tool", "*", &target_root)
+            .unwrap();
+        assert!(target_root.join("usr/local/bin/dep-tool").exists());
+
+        fs::remove_file(target_root.join("usr/local/bin/dep-tool")).unwrap();
+        let report = app.upgrade(Some(&repo_root), &target_root).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(target_root.join("usr/local/bin/dep-tool")).unwrap(),
+            "#!/bin/sh\necho dependency\n"
+        );
+        assert!(report
+            .packages
+            .iter()
+            .any(|package| package.package_name == "dep-tool" && package.action == "reinstall"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn explicit_recipe_root_overrides_configured_repos() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5171,6 +5364,90 @@ owned_prefixes = ["/usr/local"]
             normalize_existing_path(&build.package_archive_path)
         );
         assert_ne!(stale.recipe_hash, ready.recipe_hash);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_require_ready_cache_rejects_stale_cached_package() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sloppkg-core-require-cache-{unique}"));
+        let state_root = root.join("state");
+        let repo_root = root.join("repo");
+        let target_root = root.join("target-root");
+        let packages_root = repo_root.join("packages");
+
+        fs::create_dir_all(&packages_root).unwrap();
+        fs::create_dir_all(&target_root).unwrap();
+        fs::write(
+            repo_root.join("repo.toml"),
+            "name = \"workspace\"\nkind = \"recipe\"\n",
+        )
+        .unwrap();
+        write_test_package(
+            &packages_root,
+            "hello-tool",
+            "0.1.0",
+            1,
+            r#"[package]
+name = "hello-tool"
+version = "0.1.0"
+release = 1
+summary = "hello tool"
+description = "hello tool"
+license = "MIT"
+architectures = ["aarch64"]
+
+[[sources]]
+kind = "file"
+url = "hello.txt"
+sha256 = "local"
+destination = "hello.txt"
+
+[build]
+system = "custom"
+out_of_tree = true
+install = [
+  "mkdir -p \"$PKG_DESTDIR/usr/local/bin\"",
+  "install -m 0755 \"$PKG_SOURCE_DIR/hello.txt\" \"$PKG_DESTDIR/usr/local/bin/hello-tool\""
+]
+
+[install]
+prefix = "/usr/local"
+owned_prefixes = ["/usr/local"]
+"#,
+            "#!/bin/sh\necho first\n",
+        );
+        let hello_txt = packages_root.join("hello-tool/0.1.0-1/hello.txt");
+        fs::write(&hello_txt, "#!/bin/sh\necho first\n").unwrap();
+
+        let app = App::new(AppPaths::from_state_root(state_root.clone()));
+        app.build(Some(&repo_root), "hello-tool", "*").unwrap();
+        fs::write(&hello_txt, "#!/bin/sh\necho second\n").unwrap();
+
+        let err = app
+            .install_with_options(
+                Some(&repo_root),
+                "hello-tool",
+                "*",
+                &target_root,
+                TransactionOptions {
+                    skip_publish_maintenance: false,
+                    require_ready_cache: true,
+                },
+            )
+            .unwrap_err();
+
+        match err {
+            AppError::CacheNotReady { package, status } => {
+                assert_eq!(package, "hello-tool");
+                assert_eq!(status, "stale");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
 
         let _ = fs::remove_dir_all(root);
     }
@@ -6042,6 +6319,7 @@ owned_prefixes = ["/usr/local"]
                 &target_root,
                 TransactionOptions {
                     skip_publish_maintenance: true,
+                    require_ready_cache: false,
                 },
             )
             .unwrap();

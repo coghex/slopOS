@@ -14,6 +14,7 @@ WORK_ROOT="${WORK_ROOT:-$ROOTFS_STATE_ROOT/build}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-$ROOTFS_STATE_ROOT/artifacts}"
 LOG_ROOT="${LOG_ROOT:-$ROOTFS_STATE_ROOT/logs}"
 LOCK_DIR="${LOCK_DIR:-$ROOTFS_STATE_ROOT/locks/build-rootfs.lock}"
+KEEP_ARTIFACT_REVISIONS="${KEEP_ARTIFACT_REVISIONS:-2}"
 KEEP_WORKDIR=0
 LOCK_ACQUIRED=0
 CURRENT_PHASE="initializing"
@@ -190,6 +191,29 @@ run_logged() {
   fi
 }
 
+prune_old_artifacts() {
+  keep_revisions="$1"
+  if [ "$keep_revisions" -lt 1 ]; then
+    keep_revisions=1
+  fi
+
+  artifact_ids="$(
+    for artifact_path in "$ARTIFACT_ROOT"/rootfs-*; do
+      [ -d "$artifact_path" ] || continue
+      basename "$artifact_path"
+    done | sort -r
+  )"
+
+  kept_count=0
+  for artifact_id in $artifact_ids; do
+    kept_count=$((kept_count + 1))
+    if [ "$kept_count" -le "$keep_revisions" ]; then
+      continue
+    fi
+    run_logged "Pruning old rootfs artifact $artifact_id" rm -rf "$ARTIFACT_ROOT/$artifact_id"
+  done
+}
+
 acquire_lock() {
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     LOCK_ACQUIRED=1
@@ -323,6 +347,8 @@ if [ -n "$IMAGE_FILE_OUTPUT" ]; then
 fi
 
 ln -sfn "$ARTIFACT_ID" "$ARTIFACT_ROOT/current"
+set_phase "prune"
+prune_old_artifacts "$KEEP_ARTIFACT_REVISIONS"
 set_phase "complete"
 log_line "rootfs artifact build complete"
 

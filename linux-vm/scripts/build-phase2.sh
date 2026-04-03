@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILDROOT_DIR="$ROOT_DIR/buildroot-src"
+BUILDROOT_EXTERNAL_DIR="$ROOT_DIR/buildroot-external"
 OUTPUT_DIR="$ROOT_DIR/artifacts/buildroot-output"
 DEFCONFIG_PATH="$ROOT_DIR/configs/slopos_aarch64_virt_defconfig"
 PRECHECK_SCRIPT="$ROOT_DIR/scripts/host-preflight.sh"
@@ -45,6 +46,11 @@ if [[ ! -f "$DEFCONFIG_PATH" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$BUILDROOT_EXTERNAL_DIR/external.desc" ]]; then
+  echo "Missing Buildroot external tree: $BUILDROOT_EXTERNAL_DIR" >&2
+  exit 1
+fi
+
 if [[ -z "$HOST_GCC" || ! -x "$HOST_GCC" ]]; then
   echo "Missing GNU gcc. Install Homebrew gcc or set HOST_GCC explicitly." >&2
   exit 1
@@ -65,6 +71,7 @@ mkdir -p "$OUTPUT_DIR"
 
 make -C "$BUILDROOT_DIR" \
   O="$OUTPUT_DIR" \
+  BR2_EXTERNAL="$BUILDROOT_EXTERNAL_DIR" \
   BR2_DEFCONFIG="$DEFCONFIG_PATH" \
   HOSTCC="$HOST_GCC" \
   HOSTCXX="$HOST_GXX" \
@@ -72,6 +79,7 @@ make -C "$BUILDROOT_DIR" \
 
 make -C "$BUILDROOT_DIR" \
   O="$OUTPUT_DIR" \
+  BR2_EXTERNAL="$BUILDROOT_EXTERNAL_DIR" \
   HOSTCC="$HOST_GCC" \
   HOSTCXX="$HOST_GXX" \
   -j"$JOBS"

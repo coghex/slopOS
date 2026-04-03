@@ -14,13 +14,17 @@ url = "https://ftp.gnu.org/gnu/gawk/gawk-5.4.0.tar.xz"
 sha256 = "3dd430f0cd3b4428c6c3f6afc021b9cd3c1f8c93f7a688dc268ca428a90b4ac1"
 strip_components = 1
 
+[[sources]]
+kind = "file"
+url = "build.sh"
+sha256 = "local"
+destination = "support/build.sh"
+
 [build]
-system = "gnu"
+system = "custom"
 out_of_tree = true
-configure = ["--prefix=/usr/local", "--without-mpfr", "--without-readline"]
 install = [
-  "make DESTDIR=\"$PKG_DESTDIR\" install",
-  "ln -sf gawk \"$PKG_DESTDIR/usr/local/bin/awk\""
+  "bash \"$PKG_SOURCE_DIR/support/build.sh\""
 ]
 
 [install]

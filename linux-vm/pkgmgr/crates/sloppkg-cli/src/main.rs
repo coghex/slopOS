@@ -110,6 +110,8 @@ struct InstallArgs {
     #[arg(long)]
     skip_publish_maintenance: bool,
     #[arg(long)]
+    require_ready_cache: bool,
+    #[arg(long)]
     json: bool,
 }
 
@@ -119,6 +121,8 @@ struct UpgradeArgs {
     root: PathBuf,
     #[arg(long)]
     skip_publish_maintenance: bool,
+    #[arg(long)]
+    require_ready_cache: bool,
     #[arg(long)]
     json: bool,
 }
@@ -381,6 +385,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &args.root,
                 TransactionOptions {
                     skip_publish_maintenance: args.skip_publish_maintenance,
+                    require_ready_cache: args.require_ready_cache,
                 },
             )?;
             if args.json {
@@ -395,6 +400,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &args.root,
                 TransactionOptions {
                     skip_publish_maintenance: args.skip_publish_maintenance,
+                    require_ready_cache: args.require_ready_cache,
                 },
             )?;
             if args.json {
@@ -409,6 +415,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &args.root,
                 TransactionOptions {
                     skip_publish_maintenance: args.skip_publish_maintenance,
+                    require_ready_cache: false,
                 },
             )?;
             if args.json {

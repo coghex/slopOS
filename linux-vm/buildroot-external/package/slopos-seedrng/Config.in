@@ -1,0 +1,6 @@
+config BR2_PACKAGE_SLOPOS_SEEDRNG
+	bool "slopos-seedrng"
+	depends on BR2_INIT_SYSV
+	help
+	  Install the standalone seedrng utility plus the early-boot init script
+	  used by slopOS so persistent random seeding does not depend on BusyBox.

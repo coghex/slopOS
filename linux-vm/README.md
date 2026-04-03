@@ -10,7 +10,7 @@ This file is the canonical technical reference for the VM project. The repositor
 
 The system has four main layers:
 
-- Buildroot in `buildroot-src/` produces the kernel and root filesystem artifacts
+- Buildroot in `buildroot-src/` produces the kernel and root filesystem artifacts, with repo-owned package/config additions layered from `buildroot-external/`
 - a separate Buildroot recovery profile produces a tiny initramfs for break-glass boots
 - host-side scripts in `scripts/` build artifacts, seed disk images, and launch QEMU
 - checked-in normal-seed files in `board/normal-rootfs-tree/` plus mutable host-provided seed inputs in `board/rootfs-overlay/` customize boot behavior and persistence
@@ -27,7 +27,7 @@ The result is a guest with:
 
 ## Repository checkout
 
-`buildroot-src/` is tracked as a Git submodule that points at upstream Buildroot.
+`buildroot-src/` is tracked as a Git submodule that points at upstream Buildroot. Repo-owned Buildroot additions should live under `buildroot-external/` so the submodule can stay close to upstream.
 
 After cloning the repository, initialize it with:
 
@@ -157,6 +157,7 @@ This disk is used for large durable state that is convenient to keep separate fr
 - `scripts/promote-guest-boot-default.sh`
 - `scripts/validate-promoted-boot-default.sh`
 - `scripts/validate-promoted-boot-rollback.sh`
+- `scripts/validate-reset-to-world.sh`
 
 These build a native AArch64 toolchain inside the guest, using the persistent data disk for sources, build trees, and install roots.
 
@@ -931,6 +932,25 @@ empty-state case as a bootstrap event automatically and installs the canonical
 target `selfhost-world` by default before returning to ordinary `upgrade`
 behavior on later runs.
 ```
+
+There is now a checked-in proof script for that contract too:
+
+```bash
+cd linux-vm && ./scripts/validate-reset-to-world.sh
+```
+
+It boots an isolated temporary VM with a fresh Buildroot root disk and a cloned
+persistent data disk, verifies the reset seed already exposes the guest
+orchestration helpers, stages the current checked-in `slopos-publish-http-repo`
+and `slopos-sync-world` helpers plus a host-built current `sloppkg` binary into
+that temporary guest, runs the in-guest replay flow, reboots, and then confirms
+the managed `dash`, managed `agetty`, persistent Dropbear handoff, and
+`sloppkg doctor` state all survive the replay. Because it works from an
+isolated cloned data disk, it also prunes stale published/build/snapshot state
+on that clone before replaying the world so an overfull persistent disk does
+not block the proof, and it now fails early if the cloned persistent cache is
+not ready for the current `selfhost-world` recipe set (currently observed as
+`package cache is not ready for libuv: stale`).
 
 For the next managed-world rebuild phase, the normal seed now also carries a
 guest-side readiness probe:

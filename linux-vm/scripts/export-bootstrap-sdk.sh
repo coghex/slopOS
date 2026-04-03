@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
 BUILDROOT_DIR="$ROOT_DIR/buildroot-src"
+BUILDROOT_EXTERNAL_DIR="$ROOT_DIR/buildroot-external"
 INSTANCE="${LIMA_INSTANCE:-slopos-builder}"
 VM_TYPE="${LIMA_VM_TYPE:-vz}"
 CPUS="${LIMA_CPUS:-4}"
@@ -29,6 +30,11 @@ if [[ ! -d "$BUILDROOT_DIR/.git" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$BUILDROOT_EXTERNAL_DIR/external.desc" ]]; then
+  echo "Missing Buildroot external tree: $BUILDROOT_EXTERNAL_DIR" >&2
+  exit 1
+fi
+
 if limactl list -q | grep -qx "$INSTANCE"; then
   limactl start "$INSTANCE" --yes
 else
@@ -50,7 +56,7 @@ sdk_cmd='set -euo pipefail; '
 sdk_cmd+="export OUTPUT_DIR=$GUEST_OUTPUT_DIR; "
 sdk_cmd+="cd $(printf '%q' "$ROOT_DIR"); "
 sdk_cmd+="test -d \"\$OUTPUT_DIR/host\" || { echo \"Missing Buildroot host tree in \$OUTPUT_DIR. Run ./scripts/build-phase2-lima.sh first.\" >&2; exit 1; }; "
-sdk_cmd+="make -C $(printf '%q' "$BUILDROOT_DIR") O=\"\$OUTPUT_DIR\" BR2_SDK_PREFIX=$(printf '%q' "$SDK_PREFIX") sdk; "
+sdk_cmd+="make -C $(printf '%q' "$BUILDROOT_DIR") O=\"\$OUTPUT_DIR\" BR2_EXTERNAL=$(printf '%q' "$BUILDROOT_EXTERNAL_DIR") BR2_SDK_PREFIX=$(printf '%q' "$SDK_PREFIX") sdk; "
 sdk_cmd+="cp \"\$OUTPUT_DIR/images/$SDK_PREFIX.tar.gz\" $(printf '%q' "$ARTIFACT_DIR/$SDK_PREFIX.tar.gz")"
 
 limactl shell --start --workdir "$ROOT_DIR" "$INSTANCE" bash -lc "$sdk_cmd"

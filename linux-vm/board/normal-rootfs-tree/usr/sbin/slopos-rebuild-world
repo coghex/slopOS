@@ -27,6 +27,7 @@ FORCE_REBUILD=0
 VALIDATE_WORLD=1
 WITH_INSTALLED_DEPENDENTS=0
 COORDINATED_MODE=0
+CACHE_ONLY=0
 CURRENT_PHASE="initializing"
 WORKFLOW_LOG=""
 LOCK_ACQUIRED=0
@@ -49,6 +50,7 @@ Usage: slopos-rebuild-world [--package <name> ...] [--slice <name> ...] [--with-
   --world-target <name>    Override the canonical world/bootstrap target used for upgrade fallback checks.
   --no-fetch               Skip sloppkg fetch during the readiness preflight.
   --prefetch-only          Resolve and fetch/verify distfiles for the expanded rebuild set, then stop.
+  --cache-only             Resolve and rebuild stale/missing archives into the cache, then stop before publish or install/upgrade.
   --publish-only           Stop after rebuild + repo publish without install/upgrade convergence.
   --force-rebuild          Ignore matching package-cache entries and rebuild every selected package.
   --no-validate            Skip the post-convergence managed-world validation pass.
@@ -59,7 +61,8 @@ selected packages even when the cache is already current.
 
 Leaf rebuilds keep the older batch behavior: ensure the selected package set is
 ready in cache, publish once, then install explicit targets or converge the
-recorded world.
+recorded world. Use --cache-only when you want to warm the cache without
+mutating the live root or publishing a candidate repo.
 
 Coordinated rebuild waves are triggered by `--slice` and/or
 `--with-installed-dependents`. Those rebuilds expand the affected package set,
@@ -368,6 +371,10 @@ while [ $# -gt 0 ]; do
       PREFETCH_ONLY=1
       shift
       ;;
+    --cache-only)
+      CACHE_ONLY=1
+      shift
+      ;;
     --publish-only)
       PUBLISH_ONLY=1
       shift
@@ -412,6 +419,11 @@ if [ "$COORDINATED_MODE" = "1" ] && [ "$PUBLISH_ONLY" = "1" ]; then
   exit 1
 fi
 
+if [ "$CACHE_ONLY" = "1" ] && [ "$PUBLISH_ONLY" = "1" ]; then
+  echo "--cache-only stops before publish and cannot be combined with --publish-only." >&2
+  exit 1
+fi
+
 if [ "$PREFETCH_ONLY" = "1" ] && [ "$FETCH_TARGETS" = "0" ]; then
   echo "--prefetch-only requires sloppkg fetch during readiness; do not combine it with --no-fetch." >&2
   exit 1
@@ -424,6 +436,11 @@ fi
 
 if [ "$PREFETCH_ONLY" = "1" ] && [ -n "$INSTALL_TARGETS" ]; then
   echo "--prefetch-only stops before install/upgrade convergence and cannot be combined with --install-target." >&2
+  exit 1
+fi
+
+if [ "$CACHE_ONLY" = "1" ] && [ -n "$INSTALL_TARGETS" ]; then
+  echo "--cache-only stops before install/upgrade convergence and cannot be combined with --install-target." >&2
   exit 1
 fi
 
@@ -442,7 +459,7 @@ if [ ! -x "$SLOPOS_PUBLISH_HTTP_REPO" ]; then
   exit 1
 fi
 
-if [ "$PUBLISH_ONLY" != "1" ] && [ -z "$INSTALL_TARGETS" ] && [ ! -x "$SLOPOS_SYNC_WORLD" ]; then
+if [ "$PUBLISH_ONLY" != "1" ] && [ "$CACHE_ONLY" != "1" ] && [ -z "$INSTALL_TARGETS" ] && [ ! -x "$SLOPOS_SYNC_WORLD" ]; then
   echo "Missing world sync helper: $SLOPOS_SYNC_WORLD" >&2
   exit 1
 fi
@@ -450,6 +467,10 @@ fi
 if [ "$VALIDATE_WORLD" = "1" ] && [ "$PREFETCH_ONLY" != "1" ] && [ "$PUBLISH_ONLY" != "1" ] && [ ! -x "$SLOPOS_VALIDATE_MANAGED_WORLD" ]; then
   echo "Missing managed-world validation helper: $SLOPOS_VALIDATE_MANAGED_WORLD" >&2
   exit 1
+fi
+
+if [ "$CACHE_ONLY" = "1" ]; then
+  VALIDATE_WORLD=0
 fi
 
 timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
@@ -465,6 +486,7 @@ log_line "stable_repo: $STABLE_REPO_NAME channel=$STABLE_CHANNEL"
 log_line "candidate_repo: $CANDIDATE_REPO_NAME channel=$CANDIDATE_CHANNEL"
 log_line "prefetch_only: $PREFETCH_ONLY"
 log_line "publish_only: $PUBLISH_ONLY"
+log_line "cache_only: $CACHE_ONLY"
 log_line "force_rebuild: $FORCE_REBUILD"
 log_line "validate_world: $VALIDATE_WORLD"
 log_line "with_installed_dependents: $WITH_INSTALLED_DEPENDENTS"
@@ -545,7 +567,7 @@ while IFS= read -r target; do
       build "$target"
     append_rebuilt_target "$target"
   fi
-  if [ "$COORDINATED_MODE" = "1" ]; then
+  if [ "$COORDINATED_MODE" = "1" ] && [ "$CACHE_ONLY" != "1" ]; then
     echo "==> Converging managed world after rebuild: $target"
     set_phase "upgrade:$target"
     log_line "phase upgrade package=$target"
@@ -557,6 +579,37 @@ while IFS= read -r target; do
       --skip-publish-maintenance
   fi
 done < "$ORDERED_TARGETS_FILE"
+
+if [ "$CACHE_ONLY" = "1" ]; then
+  REMAINING_NOT_READY=""
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    cache_status="$(cache_status_for_target "$target")"
+    if [ "$cache_status" != "ready" ]; then
+      if [ -z "$REMAINING_NOT_READY" ]; then
+        REMAINING_NOT_READY="$target:$cache_status"
+      else
+        REMAINING_NOT_READY="$REMAINING_NOT_READY $target:$cache_status"
+      fi
+    fi
+  done < "$ORDERED_TARGETS_FILE"
+
+  if [ -n "$REMAINING_NOT_READY" ]; then
+    echo "Cache warm-up did not produce ready archives for: $REMAINING_NOT_READY" >&2
+    exit 1
+  fi
+
+  set_phase "complete"
+  echo "Managed-world cache warm-up completed."
+  echo "  planned_packages: $ORDERED_BUILD_TARGETS"
+  echo "  rebuilt_packages: ${REBUILT_TARGETS:-<none>}"
+  if [ -n "$CACHED_TARGETS" ]; then
+    echo "  reused_cached_packages: $CACHED_TARGETS"
+  fi
+  echo "  cache_only: yes"
+  echo "  workflow_log: $WORKFLOW_LOG"
+  exit 0
+fi
 
 echo "==> Publishing refreshed candidate guest repo snapshot"
 set_phase "publish"
