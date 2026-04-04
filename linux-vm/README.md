@@ -297,7 +297,8 @@ Important host-side ext4 audit paths under `artifacts/guest-ext4-sealing-audit/`
 
 Important guest-native rootfs artifact paths under `/Volumes/slopos-data/rootfs/`:
 
-- `input/current/` - staged Buildroot base rootfs archive plus the checked-in seed inputs
+- `input/<bundle>/` - versioned staged rootfs input bundle with the Buildroot base archive, seed inputs, and `rootfs-inputs.toml` provenance file
+- `input/current/` - symlink to the latest staged rootfs input bundle
 - `artifacts/rootfs-<timestamp>/rootfs-tree.tar` - guest-assembled rootfs tree after rerunning the normal seed assembly hook
 - `artifacts/rootfs-<timestamp>/rootfs.ext4` - guest-sealed ext4 image on rebuilt seeds, or host/Lima-sealed compatibility fallback image on older guests
 - `artifacts/current` - symlink to the latest validated guest-built rootfs artifact set
@@ -1124,10 +1125,14 @@ cd linux-vm && RESET_ROOT_DISK=1 ROOTFS_SOURCE_IMAGE=artifacts/guest-rootfs-cand
 This path still keeps the current ownership boundary honest. The normal bootable
 rootfs surface is still mostly Buildroot-owned, so the host wrapper first
 extracts the current Buildroot `rootfs.ext4` into a staged plain tar archive
-and ships that base tree into `/Volumes/slopos-data/rootfs/input/current` alongside the
-checked-in `board/normal-post-fakeroot.sh`, `board/normal-rootfs-tree/`,
-`board/rootfs-overlay/`, the current normal defconfig, and the bootstrap
-manifest.
+and ships that base tree into a versioned
+`/Volumes/slopos-data/rootfs/input/<bundle>/` directory alongside the checked-in
+`board/normal-post-fakeroot.sh`, `board/normal-rootfs-tree/`, a synthesized
+`rootfs-overlay/` projection containing only the manifest-declared
+`mutable_overlay_paths` entries from `board/rootfs-overlay/`, the current
+normal defconfig, the bootstrap manifest, and a `rootfs-inputs.toml`
+provenance file before advancing `input/current` to that explicit staged
+bundle.
 
 The guest helper `/usr/sbin/slopos-build-rootfs-artifacts` then reruns the same
 normal-image assembly hook in-guest, normalizes the extracted base tree back to
@@ -1141,15 +1146,23 @@ compression stdlib modules. The host/Lima wrapper still retains the old sealing
 path as a compatibility fallback for older guests that have not yet been
 reseeded onto that new image, but that fallback is now explicit: set
 `ALLOW_HOST_ROOTFS_SEAL_FALLBACK=0` to fail instead of silently resealing on
-the host.
+the host. Before the helper applies the repo-owned assembly hook, it now also
+checks the extracted base archive against the manifest-declared
+`buildroot_seed_surface.critical_paths` list so the current stage0 substrate is
+explicit instead of implicit.
 
 The guest rootfs artifact manifest now records more of that contract directly:
 
+- the staged `rootfs-inputs.toml` provenance file and a deterministic
+  `input-root.manifest` for the full staged input bundle
 - the staged `normal-post-fakeroot.sh` assembly hook and its SHA-256
-- deterministic manifests for the staged `normal-rootfs-tree/` and
+- deterministic manifests for the staged `normal-rootfs-tree/` and synthesized
   `rootfs-overlay/` inputs
 - both the guest-produced seal state (`staged_seal_method`) and the final seal
   state (`seal_method`), so host fallback remains auditable instead of implicit
+
+That rootfs artifact manifest is now `schema_version = 3`, matching the shift
+from implicit `input/current` assumptions to explicit staged-input provenance.
 
 The checked-in ext4 audit path now makes the transition boundary concrete:
 
@@ -1254,7 +1267,8 @@ Today, the built `rootfs.ext4` shows that:
 - Buildroot still emits the directory skeleton and most of `/bin`, `/sbin`, `/usr`, `/lib*`, and baseline `/etc`
 - the checked-in normal seed tree currently contributes `/init`, `/etc/inittab`, `/etc/profile.d/00-managed-path.sh`, `/etc/resolv.conf.static`, `/usr/sbin/slopos-publish-http-repo`, `/usr/sbin/slopos-rebuild-world`, `/usr/sbin/slopos-sync-world`, `/usr/sbin/slopos-validate-managed-world`, `/usr/sbin/slopos-validate-rebuild-readiness`, and the `S11`-`S20` boot glue
 - `board/normal-post-fakeroot.sh` is now the explicit final-assembly hook for the normal image: it installs the checked-in seed tree, imports mutable `/root/.ssh/authorized_keys` data when present, removes stale BusyBox leftovers, removes the unused `/linuxrc` path, rewires `/bin/sh -> dash`, `/sbin/getty -> /sbin/agetty`, `/sbin/{ifup,ifdown} -> /usr/sbin/*`, and prunes a few stale init hooks when direct providers are present
-- `board/rootfs-overlay/root/.ssh/authorized_keys` is now the only mutable host-injected build input under `board/rootfs-overlay/`; the checked-in static seed files live under `board/normal-rootfs-tree/` instead
+- `board/rootfs-overlay/root/.ssh/authorized_keys` is now the only mutable host-injected build input under `board/rootfs-overlay/`; the checked-in static seed files live under `board/normal-rootfs-tree/` instead, and `scripts/build-guest-rootfs-artifacts.sh` now rejects unexpected extra files there when it synthesizes the staged mutable overlay bundle
+- `rootfs/bootstrap-manifest.toml` now also names the minimum `buildroot_seed_surface.critical_paths` that the extracted base archive must provide before the guest helper is allowed to apply repo-owned normal-rootfs assembly
 - a fresh seed image currently does **not** ship a populated `/usr/local`; managed `/usr/local` ownership is reintroduced later from persistent state by `sloppkg` and the boot-time reconnection hooks
 
 That means the normal seed image is already BusyBox-free and boot-stable, but it
@@ -1262,6 +1276,12 @@ is still fundamentally a Buildroot-produced root filesystem with repo-owned
 boot glue layered onto it. Phase 12 starts from making that boundary explicit so
 the normal image can eventually follow recovery's lead and become a
 deliberately repo-owned final tree too.
+
+`rootfs/bootstrap-manifest.toml` now mirrors that boundary in machine-readable
+form through `buildroot_owned_prefixes`, `repo_owned_paths`,
+`mutable_overlay_paths`, `compatibility_symlinks`, and
+`expected_empty_managed_prefixes`, so the rootfs validators can consume the same
+ownership contract instead of hardcoding it.
 
 ### Managed world
 

@@ -101,9 +101,12 @@ manifest = parse_toml(manifest_path)
 handoff = parse_toml(handoff_path)
 
 required_manifest = {
-    "schema_version": "2",
+    "schema_version": "3",
     "source_post_fakeroot": "normal-post-fakeroot.sh",
+    "staged_input_metadata": "rootfs-inputs.toml",
+    "staged_input_root_manifest": "input-root.manifest",
     "normal_seed_tree_manifest": "normal-rootfs-tree.manifest",
+    "mutable_overlay_manifest": "rootfs-overlay.manifest",
     "image_name": "rootfs.ext4",
 }
 for key, expected in required_manifest.items():
@@ -183,27 +186,25 @@ shutdown_vm() {
   fi
 }
 
-repo_owned_paths_literal="$(python3 - "$ROOT_DIR/rootfs/bootstrap-manifest.toml" <<'PY'
+ownership_literals="$(python3 - "$ROOT_DIR/rootfs/bootstrap-manifest.toml" <<'PY'
 import sys
+import tomllib
 
-paths = []
-capture = False
-with open(sys.argv[1], "r", encoding="utf-8") as fh:
-    for line in fh:
-        stripped = line.strip()
-        if stripped == "repo_owned_paths = [":
-            capture = True
-            continue
-        if capture:
-            if stripped == "]":
-                break
-            if stripped.endswith(","):
-                stripped = stripped[:-1]
-            paths.append(stripped.strip('"'))
+with open(sys.argv[1], "rb") as fh:
+    manifest = tomllib.load(fh)
 
-print(repr(paths))
+normal_seed_tree = manifest["normal_seed_tree"]
+print(repr(normal_seed_tree["repo_owned_paths"]))
+print(repr(normal_seed_tree["mutable_overlay_paths"]))
+print(repr(normal_seed_tree["compatibility_symlinks"]))
+print(repr(normal_seed_tree["expected_empty_managed_prefixes"]))
 PY
 )"
+mapfile -t ownership_literal_lines <<<"$ownership_literals"
+repo_owned_paths_literal="${ownership_literal_lines[0]}"
+mutable_overlay_paths_literal="${ownership_literal_lines[1]}"
+compatibility_symlinks_literal="${ownership_literal_lines[2]}"
+expected_empty_managed_prefixes_literal="${ownership_literal_lines[3]}"
 
 mkdir -p "$ROOT_DIR/qemu"
 TMPDIR_HOST="$(mktemp -d "$ROOT_DIR/qemu/validate-guest-rootfs-boot.XXXXXX")"
@@ -243,6 +244,9 @@ python3 - <<'PY'
 import os
 
 repo_owned_paths = $repo_owned_paths_literal
+mutable_overlay_paths = $mutable_overlay_paths_literal
+compatibility_symlinks = $compatibility_symlinks_literal
+expected_empty_managed_prefixes = $expected_empty_managed_prefixes_literal
 
 for unexpected in ("/bin/busybox", "/linuxrc", "/bin/ash"):
     if os.path.lexists(unexpected):
@@ -256,20 +260,18 @@ for required in repo_owned_paths:
     if not os.path.lexists(required):
         raise SystemExit(f"missing live repo-owned seed path: {required}")
 
+for required in mutable_overlay_paths:
+    if not os.path.lexists(required):
+        raise SystemExit(f"missing live mutable seed path: {required}")
+
 for helper_path in repo_owned_paths:
     if not helper_path.startswith("/usr/sbin/slopos-"):
         continue
     if not os.access(helper_path, os.X_OK):
         raise SystemExit(f"live helper is not executable: {helper_path}")
 
-compatibility_links = {
-    "/bin/sh": "/bin/dash",
-    "/sbin/getty": "/sbin/agetty",
-    "/sbin/ifup": "/usr/sbin/ifup",
-    "/sbin/ifdown": "/usr/sbin/ifdown",
-}
-
-for link_path, expected_target in compatibility_links.items():
+for link_spec in compatibility_symlinks:
+    link_path, expected_target = link_spec.split("->", 1)
     if not os.path.islink(link_path):
         raise SystemExit(f"live compatibility path is not a symlink: {link_path}")
     link_target = os.readlink(link_path)
@@ -290,8 +292,10 @@ if not mounted:
     raise SystemExit("persistent data mount is missing at /Volumes/slopos-data")
 
 managed_leaks = []
-if os.path.lexists("/usr/local"):
-    for dirpath, dirnames, filenames in os.walk("/usr/local"):
+for prefix in expected_empty_managed_prefixes:
+    if not os.path.lexists(prefix):
+        continue
+    for dirpath, dirnames, filenames in os.walk(prefix):
         dirnames.sort()
         filenames.sort()
         for dirname in list(dirnames):

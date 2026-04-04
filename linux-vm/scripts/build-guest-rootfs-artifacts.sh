@@ -187,17 +187,81 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+describe_source_path() {
+  local path="$1"
+
+  if [[ "$path" == "$ROOT_DIR/"* ]]; then
+    printf '%s\n' "${path#$ROOT_DIR/}"
+    return 0
+  fi
+
+  printf '%s\n' "$path"
+}
+
+stage_mutable_overlay() {
+  local source_dir="$1"
+  local manifest_path="$2"
+  local dest_dir="$3"
+
+  python3 - "$source_dir" "$manifest_path" "$dest_dir" <<'PY'
+import os
+import pathlib
+import shutil
+import sys
+import tomllib
+
+source_dir = pathlib.Path(sys.argv[1])
+manifest_path = pathlib.Path(sys.argv[2])
+dest_dir = pathlib.Path(sys.argv[3])
+
+with manifest_path.open("rb") as fh:
+    manifest = tomllib.load(fh)
+
+mutable_paths = manifest["normal_seed_tree"]["mutable_overlay_paths"]
+expected = {path.lstrip("/") for path in mutable_paths}
+dest_dir.mkdir(parents=True, exist_ok=True)
+
+actual = set()
+for path in sorted(source_dir.rglob("*")):
+    if path.is_dir():
+        continue
+    actual.add(path.relative_to(source_dir).as_posix())
+
+unexpected = sorted(actual - expected)
+if unexpected:
+    raise SystemExit(
+        "unexpected files under mutable rootfs overlay: "
+        + ", ".join(unexpected)
+    )
+
+for rel in sorted(expected):
+    source_path = source_dir / rel
+    if not source_path.exists() and not source_path.is_symlink():
+        continue
+    dest_path = dest_dir / rel
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.is_symlink():
+        if dest_path.exists() or dest_path.is_symlink():
+            dest_path.unlink()
+        os.symlink(os.readlink(source_path), dest_path)
+    else:
+        shutil.copy2(source_path, dest_path)
+PY
+}
 mkdir -p "$ROOT_DIR/qemu"
 TMPDIR_HOST="$(mktemp -d "$ROOT_DIR/qemu/guest-rootfs-build.XXXXXX")"
 EXTRACTED_ROOTFS_DIR="$TMPDIR_HOST/base-rootfs"
 BASE_ROOTFS_ARCHIVE="$TMPDIR_HOST/base-rootfs.tar"
 ASSEMBLED_ROOTFS_ARCHIVE="$TMPDIR_HOST/rootfs-tree.tar"
 SEALED_ROOTFS_IMAGE="$TMPDIR_HOST/rootfs.ext4"
+STAGED_ROOTFS_OVERLAY_SOURCE="$TMPDIR_HOST/rootfs-overlay"
 
 "$PREPARE_GUEST_SSH_SCRIPT"
 
 extract_rootfs_tree "$ROOTFS_IMAGE" "$EXTRACTED_ROOTFS_DIR"
 tar -C "$EXTRACTED_ROOTFS_DIR" -cf "$BASE_ROOTFS_ARCHIVE" .
+stage_mutable_overlay "$ROOTFS_OVERLAY_SOURCE" "$BOOTSTRAP_MANIFEST_PATH" "$STAGED_ROOTFS_OVERLAY_SOURCE"
 
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
@@ -206,7 +270,10 @@ if [[ -n "$OVERRIDE_GUEST_SSH_FORWARD_PORT" ]]; then
 fi
 
 ROOTFS_STATE_ROOT="${ROOTFS_STATE_ROOT:-$PERSISTENT_MOUNTPOINT/rootfs}"
-ROOTFS_INPUT_ROOT="${ROOTFS_INPUT_ROOT:-$ROOTFS_STATE_ROOT/input/current}"
+ROOTFS_INPUT_BASE="${ROOTFS_INPUT_BASE:-$ROOTFS_STATE_ROOT/input}"
+ROOTFS_INPUT_BUNDLE_ID="${ROOTFS_INPUT_BUNDLE_ID:-rootfs-inputs-$(date -u '+%Y%m%dT%H%M%SZ')}"
+ROOTFS_INPUT_ROOT="${ROOTFS_INPUT_ROOT:-$ROOTFS_INPUT_BASE/$ROOTFS_INPUT_BUNDLE_ID}"
+ROOTFS_INPUT_CURRENT_LINK="${ROOTFS_INPUT_CURRENT_LINK:-$ROOTFS_INPUT_BASE/current}"
 GUEST_ROOTFS_HELPER_DEST="${GUEST_ROOTFS_HELPER_DEST:-/tmp/slopos-build-rootfs-artifacts}"
 GUEST_BASE_ARCHIVE_PATH="${GUEST_BASE_ARCHIVE_PATH:-$ROOTFS_INPUT_ROOT/$(basename "$BASE_ROOTFS_ARCHIVE")}"
 GUEST_DEFCONFIG_PATH="${GUEST_DEFCONFIG_PATH:-$ROOTFS_INPUT_ROOT/$(basename "$DEFCONFIG_PATH")}"
@@ -214,6 +281,35 @@ GUEST_BOOTSTRAP_MANIFEST_PATH="${GUEST_BOOTSTRAP_MANIFEST_PATH:-$ROOTFS_INPUT_RO
 GUEST_POST_FAKEROOT_PATH="${GUEST_POST_FAKEROOT_PATH:-$ROOTFS_INPUT_ROOT/normal-post-fakeroot.sh}"
 GUEST_NORMAL_SEED_TREE="${GUEST_NORMAL_SEED_TREE:-$ROOTFS_INPUT_ROOT/normal-rootfs-tree}"
 GUEST_ROOTFS_OVERLAY="${GUEST_ROOTFS_OVERLAY:-$ROOTFS_INPUT_ROOT/rootfs-overlay}"
+GUEST_ROOTFS_INPUT_METADATA_PATH="${GUEST_ROOTFS_INPUT_METADATA_PATH:-$ROOTFS_INPUT_ROOT/rootfs-inputs.toml}"
+
+base_rootfs_source_desc="$(describe_source_path "$ROOTFS_IMAGE")"
+defconfig_source_desc="$(describe_source_path "$DEFCONFIG_PATH")"
+bootstrap_manifest_source_desc="$(describe_source_path "$BOOTSTRAP_MANIFEST_PATH")"
+post_fakeroot_source_desc="$(describe_source_path "$ROOTFS_POST_FAKEROOT_SOURCE")"
+normal_seed_tree_source_desc="$(describe_source_path "$NORMAL_SEED_TREE_SOURCE")"
+rootfs_overlay_source_desc="$(describe_source_path "$ROOTFS_OVERLAY_SOURCE")"
+local_rootfs_input_metadata="$TMPDIR_HOST/rootfs-inputs.toml"
+
+cat >"$local_rootfs_input_metadata" <<EOF
+schema_version = 1
+input_bundle_id = "$ROOTFS_INPUT_BUNDLE_ID"
+input_root = "$ROOTFS_INPUT_ROOT"
+staged_at = "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+staged_by = "scripts/build-guest-rootfs-artifacts.sh"
+source_base_rootfs_image = "$base_rootfs_source_desc"
+source_defconfig_path = "$defconfig_source_desc"
+source_bootstrap_manifest_path = "$bootstrap_manifest_source_desc"
+source_post_fakeroot_path = "$post_fakeroot_source_desc"
+source_normal_seed_tree_path = "$normal_seed_tree_source_desc"
+source_rootfs_overlay_path = "$rootfs_overlay_source_desc"
+staged_base_archive = "$(basename "$GUEST_BASE_ARCHIVE_PATH")"
+staged_defconfig = "$(basename "$GUEST_DEFCONFIG_PATH")"
+staged_bootstrap_manifest = "$(basename "$GUEST_BOOTSTRAP_MANIFEST_PATH")"
+staged_post_fakeroot = "$(basename "$GUEST_POST_FAKEROOT_PATH")"
+staged_normal_seed_tree = "$(basename "$GUEST_NORMAL_SEED_TREE")"
+staged_rootfs_overlay = "$(basename "$GUEST_ROOTFS_OVERLAY")"
+EOF
 
 "$ROOT_DIR/scripts/ssh-guest.sh" "mkdir -p '$ROOTFS_INPUT_ROOT'"
 "$ROOT_DIR/scripts/scp-to-guest.sh" "$ROOTFS_HELPER_SOURCE" "$GUEST_ROOTFS_HELPER_DEST"
@@ -221,9 +317,11 @@ GUEST_ROOTFS_OVERLAY="${GUEST_ROOTFS_OVERLAY:-$ROOTFS_INPUT_ROOT/rootfs-overlay}
 "$ROOT_DIR/scripts/scp-to-guest.sh" "$DEFCONFIG_PATH" "$GUEST_DEFCONFIG_PATH"
 "$ROOT_DIR/scripts/scp-to-guest.sh" "$BOOTSTRAP_MANIFEST_PATH" "$GUEST_BOOTSTRAP_MANIFEST_PATH"
 "$ROOT_DIR/scripts/scp-to-guest.sh" "$ROOTFS_POST_FAKEROOT_SOURCE" "$GUEST_POST_FAKEROOT_PATH"
+"$ROOT_DIR/scripts/scp-to-guest.sh" "$local_rootfs_input_metadata" "$GUEST_ROOTFS_INPUT_METADATA_PATH"
 "$ROOT_DIR/scripts/ssh-guest.sh" "rm -rf '$GUEST_NORMAL_SEED_TREE' '$GUEST_ROOTFS_OVERLAY'"
 "$ROOT_DIR/scripts/scp-to-guest.sh" "$NORMAL_SEED_TREE_SOURCE" "$ROOTFS_INPUT_ROOT/"
-"$ROOT_DIR/scripts/scp-to-guest.sh" "$ROOTFS_OVERLAY_SOURCE" "$ROOTFS_INPUT_ROOT/"
+"$ROOT_DIR/scripts/scp-to-guest.sh" "$STAGED_ROOTFS_OVERLAY_SOURCE" "$ROOTFS_INPUT_ROOT/"
+"$ROOT_DIR/scripts/ssh-guest.sh" "rm -rf '$ROOTFS_INPUT_CURRENT_LINK' && ln -s '$ROOTFS_INPUT_ROOT' '$ROOTFS_INPUT_CURRENT_LINK'"
 
 "$ROOT_DIR/scripts/ssh-guest.sh" bash -s -- \
   "$GUEST_ROOTFS_HELPER_DEST" \
@@ -232,7 +330,8 @@ GUEST_ROOTFS_OVERLAY="${GUEST_ROOTFS_OVERLAY:-$ROOTFS_INPUT_ROOT/rootfs-overlay}
   "$GUEST_BASE_ARCHIVE_PATH" \
   "$GUEST_POST_FAKEROOT_PATH" \
   "$GUEST_DEFCONFIG_PATH" \
-  "$GUEST_BOOTSTRAP_MANIFEST_PATH" <<'EOF'
+  "$GUEST_BOOTSTRAP_MANIFEST_PATH" \
+  "$GUEST_ROOTFS_INPUT_METADATA_PATH" <<'EOF'
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -250,6 +349,8 @@ defconfig_path="$1"
 shift
 bootstrap_manifest_path="$1"
 shift
+rootfs_input_metadata_path="$1"
+shift
 
 chmod 0755 "$rootfs_helper" "$post_fakeroot_path"
 
@@ -260,6 +361,7 @@ env \
   ROOTFS_POST_FAKEROOT_SCRIPT="$post_fakeroot_path" \
   DEFCONFIG_PATH="$defconfig_path" \
   BOOTSTRAP_MANIFEST_PATH="$bootstrap_manifest_path" \
+  ROOTFS_INPUT_METADATA_PATH="$rootfs_input_metadata_path" \
   "$rootfs_helper"
 EOF
 

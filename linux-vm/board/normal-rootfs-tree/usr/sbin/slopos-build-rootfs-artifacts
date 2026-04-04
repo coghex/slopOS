@@ -8,6 +8,7 @@ BASE_ROOTFS_ARCHIVE="${BASE_ROOTFS_ARCHIVE:-}"
 ROOTFS_POST_FAKEROOT_SCRIPT="${ROOTFS_POST_FAKEROOT_SCRIPT:-$ROOTFS_INPUT_ROOT/normal-post-fakeroot.sh}"
 DEFCONFIG_PATH="${DEFCONFIG_PATH:-$ROOTFS_INPUT_ROOT/slopos_aarch64_virt_defconfig}"
 BOOTSTRAP_MANIFEST_PATH="${BOOTSTRAP_MANIFEST_PATH:-$ROOTFS_INPUT_ROOT/bootstrap-manifest.toml}"
+ROOTFS_INPUT_METADATA_PATH="${ROOTFS_INPUT_METADATA_PATH:-$ROOTFS_INPUT_ROOT/rootfs-inputs.toml}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-}"
 ROOTFS_LABEL="${ROOTFS_LABEL:-}"
 WORK_ROOT="${WORK_ROOT:-$ROOTFS_STATE_ROOT/build}"
@@ -108,6 +109,40 @@ supports_mke2fs_populate_dir() {
   return 1
 }
 
+validate_buildroot_seed_surface() {
+  stage_root="$1"
+  manifest_path="$2"
+  python3 - "$stage_root" "$manifest_path" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+stage_root = pathlib.Path(sys.argv[1])
+manifest_path = pathlib.Path(sys.argv[2])
+
+with manifest_path.open("rb") as fh:
+    manifest = tomllib.load(fh)
+
+critical_paths = manifest.get("buildroot_seed_surface", {}).get("critical_paths")
+if not critical_paths:
+    raise SystemExit(
+        "bootstrap manifest missing buildroot_seed_surface.critical_paths"
+    )
+
+missing = []
+for required_path in critical_paths:
+    candidate = stage_root / required_path.lstrip("/")
+    if not candidate.exists():
+        missing.append(required_path)
+
+if missing:
+    raise SystemExit(
+        "missing required Buildroot stage0 paths in extracted base rootfs: "
+        + ", ".join(missing)
+    )
+PY
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --base-archive)
@@ -171,7 +206,7 @@ for tool in bash python3 tar sha256sum sed awk find chown mke2fs file; do
   require_exec "$tool"
 done
 
-for path in "$BASE_ROOTFS_ARCHIVE" "$ROOTFS_POST_FAKEROOT_SCRIPT" "$DEFCONFIG_PATH" "$BOOTSTRAP_MANIFEST_PATH"; do
+for path in "$BASE_ROOTFS_ARCHIVE" "$ROOTFS_POST_FAKEROOT_SCRIPT" "$DEFCONFIG_PATH" "$BOOTSTRAP_MANIFEST_PATH" "$ROOTFS_INPUT_METADATA_PATH"; do
   if [ ! -e "$path" ]; then
     echo "Missing required rootfs input: $path" >&2
     exit 1
@@ -292,6 +327,7 @@ mkdir -p "$STAGE_ROOT"
 
 set_phase "extract"
 run_logged "Extracting staged base rootfs tree" extract_tar_archive "$BASE_ROOTFS_ARCHIVE" "$STAGE_ROOT"
+run_logged "Validating extracted Buildroot stage0 surface" validate_buildroot_seed_surface "$STAGE_ROOT" "$BOOTSTRAP_MANIFEST_PATH"
 run_logged "Normalizing extracted rootfs ownership" chown -R 0:0 "$STAGE_ROOT"
 
 set_phase "assemble"
@@ -329,6 +365,8 @@ run_logged "Recording staged base archive" cp "$BASE_ROOTFS_ARCHIVE" "$ARTIFACT_
 run_logged "Recording defconfig" cp "$DEFCONFIG_PATH" "$ARTIFACT_DIR/inputs/$(basename "$DEFCONFIG_PATH")"
 run_logged "Recording bootstrap manifest" cp "$BOOTSTRAP_MANIFEST_PATH" "$ARTIFACT_DIR/inputs/$(basename "$BOOTSTRAP_MANIFEST_PATH")"
 run_logged "Recording rootfs assembly hook" cp "$ROOTFS_POST_FAKEROOT_SCRIPT" "$ARTIFACT_DIR/inputs/$(basename "$ROOTFS_POST_FAKEROOT_SCRIPT")"
+run_logged "Recording staged rootfs input metadata" cp "$ROOTFS_INPUT_METADATA_PATH" "$ARTIFACT_DIR/inputs/$(basename "$ROOTFS_INPUT_METADATA_PATH")"
+run_logged "Recording staged input root manifest" write_tree_manifest "$ROOTFS_INPUT_ROOT" "$ARTIFACT_DIR/inputs/input-root.manifest"
 
 if [ -d "$ROOTFS_INPUT_ROOT/normal-rootfs-tree" ]; then
   run_logged "Recording normal seed tree" cp -a "$ROOTFS_INPUT_ROOT/normal-rootfs-tree" "$ARTIFACT_DIR/inputs/normal-rootfs-tree"
@@ -350,7 +388,11 @@ BASE_SHA="$(sha256sum "$BASE_ROOTFS_ARCHIVE" | awk '{print $1}')"
 DEFCONFIG_SHA="$(sha256sum "$DEFCONFIG_PATH" | awk '{print $1}')"
 BOOTSTRAP_SHA="$(sha256sum "$BOOTSTRAP_MANIFEST_PATH" | awk '{print $1}')"
 POST_FAKEROOT_SHA="$(sha256sum "$ROOTFS_POST_FAKEROOT_SCRIPT" | awk '{print $1}')"
+INPUT_METADATA_NAME="$(basename "$ROOTFS_INPUT_METADATA_PATH")"
+INPUT_METADATA_SHA="$(sha256sum "$ROOTFS_INPUT_METADATA_PATH" | awk '{print $1}')"
 TREE_SHA="$(sha256sum "$ROOTFS_TREE_ARCHIVE" | awk '{print $1}')"
+INPUT_ROOT_MANIFEST_NAME="input-root.manifest"
+INPUT_ROOT_MANIFEST_SHA="$(sha256sum "$ARTIFACT_DIR/inputs/$INPUT_ROOT_MANIFEST_NAME" | awk '{print $1}')"
 NORMAL_SEED_TREE_MANIFEST_FILE=""
 NORMAL_SEED_TREE_MANIFEST_SHA=""
 ROOTFS_OVERLAY_MANIFEST_FILE=""
@@ -367,10 +409,14 @@ if [ -f "$ARTIFACT_DIR/inputs/rootfs-overlay.manifest" ]; then
 fi
 
 cat >"$ARTIFACT_DIR/manifest.toml" <<EOF
-schema_version = 2
+schema_version = 3
 artifact_id = "$ARTIFACT_ID"
 built_at = "$timestamp"
 input_root = "$ROOTFS_INPUT_ROOT"
+staged_input_metadata = "$INPUT_METADATA_NAME"
+staged_input_metadata_sha256 = "$INPUT_METADATA_SHA"
+staged_input_root_manifest = "$INPUT_ROOT_MANIFEST_NAME"
+staged_input_root_manifest_sha256 = "$INPUT_ROOT_MANIFEST_SHA"
 rootfs_label = "$ROOTFS_LABEL"
 rootfs_size = "$ROOTFS_SIZE"
 base_archive = "$(basename "$BASE_ROOTFS_ARCHIVE")"

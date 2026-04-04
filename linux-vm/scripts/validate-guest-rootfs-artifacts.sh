@@ -67,9 +67,13 @@ LOCAL_SEAL_METHOD="$(toml_value "$LOCAL_MANIFEST" seal_method)"
 LOCAL_STAGED_SEAL_METHOD="$(toml_value "$LOCAL_MANIFEST" staged_seal_method)"
 
 for required_line in \
+  'schema_version = 3' \
   'source_post_fakeroot = "normal-post-fakeroot.sh"' \
   'staged_seal_method = ' \
-  'normal_seed_tree_manifest = "normal-rootfs-tree.manifest"'; do
+  'staged_input_metadata = "rootfs-inputs.toml"' \
+  'staged_input_root_manifest = "input-root.manifest"' \
+  'normal_seed_tree_manifest = "normal-rootfs-tree.manifest"' \
+  'mutable_overlay_manifest = "rootfs-overlay.manifest"'; do
   if ! grep -Fq "$required_line" "$LOCAL_MANIFEST"; then
     echo "Guest rootfs manifest is missing expected provenance entry: $required_line" >&2
     exit 1

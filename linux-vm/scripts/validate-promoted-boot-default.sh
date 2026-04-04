@@ -175,11 +175,14 @@ kernel_manifest_data = parse_toml(kernel_manifest)
 kernel_handoff_data = parse_toml(kernel_handoff)
 promotion_data = parse_toml(promotion)
 
-if rootfs_manifest_data.get("schema_version") != "2":
-    raise SystemExit("promoted rootfs manifest schema_version is not 2")
+if rootfs_manifest_data.get("schema_version") != "3":
+    raise SystemExit("promoted rootfs manifest schema_version is not 3")
 for key, expected in {
     "source_post_fakeroot": "normal-post-fakeroot.sh",
+    "staged_input_metadata": "rootfs-inputs.toml",
+    "staged_input_root_manifest": "input-root.manifest",
     "normal_seed_tree_manifest": "normal-rootfs-tree.manifest",
+    "mutable_overlay_manifest": "rootfs-overlay.manifest",
     "image_name": "rootfs.ext4",
 }.items():
     if rootfs_manifest_data.get(key) != expected:

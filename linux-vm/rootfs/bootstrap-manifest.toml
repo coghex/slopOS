@@ -37,16 +37,40 @@ notes = [
   "board/normal-post-fakeroot.sh now explicitly installs the checked-in normal seed tree and mutable host-injected SSH authorization data into the final target tree, then normalizes BusyBox-free compatibility links such as /bin/sh, /sbin/getty, and /sbin/{ifup,ifdown}.",
   "A fresh seed image currently does not carry a prepopulated /usr/local tree; managed /usr/local ownership is restored later from persistent state and sloppkg-managed payloads.",
   "board/rootfs-overlay is now reserved for mutable host-provided seed inputs such as root/.ssh/authorized_keys rather than for the checked-in static boot glue.",
+  "scripts/build-guest-rootfs-artifacts.sh now synthesizes the staged mutable overlay from only the manifest-declared normal_seed_tree.mutable_overlay_paths entries and rejects unexpected extra files under board/rootfs-overlay.",
+]
+
+[buildroot_seed_surface]
+owner = "buildroot"
+critical_paths = [
+  "/bin/dash",
+  "/sbin/init",
+  "/sbin/blkid",
+  "/usr/bin/python3",
+  "/usr/bin/wget",
+]
+notes = [
+  "These paths are the current minimum Buildroot-provided stage0 substrate that the repo-owned normal rootfs assembly still expects before persistent-state handoff and sloppkg recovery take over.",
+  "slopos-build-rootfs-artifacts validates that each critical path exists in the extracted base rootfs archive before it applies the checked-in normal post-fakeroot assembly hook.",
 ]
 
 [normal_seed_tree]
 source = "board/normal-rootfs-tree"
 assembly_hook = "board/normal-post-fakeroot.sh"
 mutable_input = "board/rootfs-overlay"
+buildroot_owned_prefixes = [
+  "/bin",
+  "/sbin",
+  "/usr",
+  "/lib",
+  "/lib64",
+  "/etc",
+]
 notes = [
   "board/normal-rootfs-tree is the checked-in static seed tree for the normal image.",
   "board/normal-post-fakeroot.sh installs that tree into the final fakeroot target explicitly instead of relying on Buildroot's rootfs overlay copy step for the static repo-owned files.",
   "board/rootfs-overlay remains only a mutable host-input area because prepare-guest-ssh.sh injects root/.ssh/authorized_keys there before builds.",
+  "The host rootfs-artifact wrapper stages a synthesized rootfs-overlay tree containing only the declared mutable_overlay_paths entries before handing the bundle to the guest helper.",
 ]
 repo_owned_paths = [
   "/init",
@@ -76,6 +100,22 @@ repo_owned_paths = [
 ]
 mutable_overlay_paths = [
   "/root/.ssh/authorized_keys",
+]
+compatibility_symlinks = [
+  "/bin/sh->/bin/dash",
+  "/sbin/getty->/sbin/agetty",
+  "/sbin/ifup->/usr/sbin/ifup",
+  "/sbin/ifdown->/usr/sbin/ifdown",
+]
+expected_empty_managed_prefixes = [
+  "/usr/local",
+]
+post_fakeroot_actions = [
+  "install the checked-in board/normal-rootfs-tree into the final target tree",
+  "inject mutable board/rootfs-overlay/root/.ssh/authorized_keys when prepare-guest-ssh.sh has staged it",
+  "prune stale BusyBox symlinks and remove the unused /linuxrc entrypoint",
+  "normalize the /bin/sh, /sbin/getty, and /sbin/{ifup,ifdown} compatibility links",
+  "prune stale init hooks when direct providers such as syslogd, crond, or util-linux tools are present",
 ]
 
 [managed_world]
@@ -142,9 +182,9 @@ notes = [
 [rootfs_artifacts]
 owner = "guest-native build workflow"
 input_contract = [
-  "The host stages a plain tar archive of the current Buildroot normal rootfs tree, plus board/normal-post-fakeroot.sh, board/normal-rootfs-tree, board/rootfs-overlay, configs/slopos_aarch64_virt_defconfig, and this bootstrap manifest under /Volumes/slopos-data/rootfs/input/current.",
+  "scripts/build-guest-rootfs-artifacts.sh now stages a versioned /Volumes/slopos-data/rootfs/input/<bundle>/ root containing the current Buildroot base rootfs archive, board/normal-post-fakeroot.sh, board/normal-rootfs-tree, a synthesized rootfs-overlay projection containing only the manifest-declared mutable_overlay_paths entries from board/rootfs-overlay, configs/slopos_aarch64_virt_defconfig, this bootstrap manifest, and a rootfs-inputs.toml provenance file, then advances input/current to that explicit staged bundle before invoking the guest helper.",
   "The guest helper extracts that staged base tree, normalizes it back to root:root ownership, reruns the checked-in normal-post-fakeroot assembly logic, clears transient run/tmp state, and archives the assembled result as rootfs-tree.tar in the versioned artifact directory.",
-  "The rootfs artifact manifest now records the staged assembly hook itself plus deterministic manifests for the staged normal seed tree and mutable overlay so the host can audit exactly which checked-in inputs produced a candidate image.",
+  "The rootfs artifact manifest now records staged_input_metadata, a deterministic staged_input_root_manifest, the staged assembly hook itself, and deterministic manifests for the staged normal seed tree and mutable overlay so the host can audit exactly which checked-in inputs produced a candidate image.",
   "On the rebuilt seed image that now includes e2fsprogs, the guest helper seals rootfs.ext4 directly from that assembled tree with mke2fs -t ext4 -d and records the guest seal method in the manifest.",
   "The host/Lima wrapper keeps the older seal path only as a compatibility fallback for guests that have not yet been reseeded onto the e2fsprogs-capable image, and that fallback now updates the manifest explicitly instead of silently filling in missing seal metadata.",
 ]
@@ -152,6 +192,7 @@ persistent_root = "/Volumes/slopos-data/rootfs"
 artifacts_root = "/Volumes/slopos-data/rootfs/artifacts"
 notes = [
   "Guest-built rootfs images are validation artifacts only for now; the authoritative normal boot rootfs still comes from artifacts/buildroot-output/images/rootfs.ext4.",
+  "The current guest rootfs manifest contract is schema_version = 3 so host-side validators can require explicit staged input metadata instead of inferring the staged bundle contents from filenames alone.",
   "The intended current path is now fully guest-native ext4 sealing through mke2fs -d; host/Lima sealing remains only as a compatibility bridge for older guests until they are reseeded.",
   "scripts/audit-guest-ext4-sealing.sh and /usr/sbin/slopos-audit-ext4-sealing-prereqs are the checked-in audit path for confirming whether a booted guest has crossed that boundary.",
   "The current guest-native assembly contract deliberately keeps the Buildroot-owned base tree as an input because most of the normal root surface still belongs to stage0.",
