@@ -37,6 +37,33 @@ require_exec() {
   fi
 }
 
+write_tree_manifest() {
+  source_dir="$1"
+  manifest_path="$2"
+  python3 - "$source_dir" "$manifest_path" <<'PY'
+import hashlib
+import os
+import pathlib
+import sys
+
+source_dir = pathlib.Path(sys.argv[1])
+manifest_path = pathlib.Path(sys.argv[2])
+
+with manifest_path.open("w", encoding="utf-8") as fh:
+    fh.write(f"root = {source_dir.name}\n")
+    for path in sorted(source_dir.rglob("*")):
+        rel = path.relative_to(source_dir).as_posix()
+        if path.is_symlink():
+            fh.write(f"symlink {rel} -> {os.readlink(path)}\n")
+            continue
+        if path.is_dir():
+            fh.write(f"dir {rel}\n")
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        fh.write(f"file {digest} {rel}\n")
+PY
+}
+
 extract_tar_archive() {
   archive_path="$1"
   output_dir="$2"
@@ -301,13 +328,16 @@ fi
 run_logged "Recording staged base archive" cp "$BASE_ROOTFS_ARCHIVE" "$ARTIFACT_DIR/inputs/$(basename "$BASE_ROOTFS_ARCHIVE")"
 run_logged "Recording defconfig" cp "$DEFCONFIG_PATH" "$ARTIFACT_DIR/inputs/$(basename "$DEFCONFIG_PATH")"
 run_logged "Recording bootstrap manifest" cp "$BOOTSTRAP_MANIFEST_PATH" "$ARTIFACT_DIR/inputs/$(basename "$BOOTSTRAP_MANIFEST_PATH")"
+run_logged "Recording rootfs assembly hook" cp "$ROOTFS_POST_FAKEROOT_SCRIPT" "$ARTIFACT_DIR/inputs/$(basename "$ROOTFS_POST_FAKEROOT_SCRIPT")"
 
 if [ -d "$ROOTFS_INPUT_ROOT/normal-rootfs-tree" ]; then
   run_logged "Recording normal seed tree" cp -a "$ROOTFS_INPUT_ROOT/normal-rootfs-tree" "$ARTIFACT_DIR/inputs/normal-rootfs-tree"
+  run_logged "Recording normal seed tree manifest" write_tree_manifest "$ROOTFS_INPUT_ROOT/normal-rootfs-tree" "$ARTIFACT_DIR/inputs/normal-rootfs-tree.manifest"
 fi
 
 if [ -d "$ROOTFS_INPUT_ROOT/rootfs-overlay" ]; then
   run_logged "Recording mutable rootfs overlay" cp -a "$ROOTFS_INPUT_ROOT/rootfs-overlay" "$ARTIFACT_DIR/inputs/rootfs-overlay"
+  run_logged "Recording mutable overlay manifest" write_tree_manifest "$ROOTFS_INPUT_ROOT/rootfs-overlay" "$ARTIFACT_DIR/inputs/rootfs-overlay.manifest"
 fi
 
 set_phase "validate"
@@ -319,12 +349,28 @@ fi
 BASE_SHA="$(sha256sum "$BASE_ROOTFS_ARCHIVE" | awk '{print $1}')"
 DEFCONFIG_SHA="$(sha256sum "$DEFCONFIG_PATH" | awk '{print $1}')"
 BOOTSTRAP_SHA="$(sha256sum "$BOOTSTRAP_MANIFEST_PATH" | awk '{print $1}')"
+POST_FAKEROOT_SHA="$(sha256sum "$ROOTFS_POST_FAKEROOT_SCRIPT" | awk '{print $1}')"
 TREE_SHA="$(sha256sum "$ROOTFS_TREE_ARCHIVE" | awk '{print $1}')"
+NORMAL_SEED_TREE_MANIFEST_FILE=""
+NORMAL_SEED_TREE_MANIFEST_SHA=""
+ROOTFS_OVERLAY_MANIFEST_FILE=""
+ROOTFS_OVERLAY_MANIFEST_SHA=""
+
+if [ -f "$ARTIFACT_DIR/inputs/normal-rootfs-tree.manifest" ]; then
+  NORMAL_SEED_TREE_MANIFEST_FILE="normal-rootfs-tree.manifest"
+  NORMAL_SEED_TREE_MANIFEST_SHA="$(sha256sum "$ARTIFACT_DIR/inputs/normal-rootfs-tree.manifest" | awk '{print $1}')"
+fi
+
+if [ -f "$ARTIFACT_DIR/inputs/rootfs-overlay.manifest" ]; then
+  ROOTFS_OVERLAY_MANIFEST_FILE="rootfs-overlay.manifest"
+  ROOTFS_OVERLAY_MANIFEST_SHA="$(sha256sum "$ARTIFACT_DIR/inputs/rootfs-overlay.manifest" | awk '{print $1}')"
+fi
 
 cat >"$ARTIFACT_DIR/manifest.toml" <<EOF
-schema_version = 1
+schema_version = 2
 artifact_id = "$ARTIFACT_ID"
 built_at = "$timestamp"
+input_root = "$ROOTFS_INPUT_ROOT"
 rootfs_label = "$ROOTFS_LABEL"
 rootfs_size = "$ROOTFS_SIZE"
 base_archive = "$(basename "$BASE_ROOTFS_ARCHIVE")"
@@ -333,14 +379,32 @@ source_defconfig = "$(basename "$DEFCONFIG_PATH")"
 source_defconfig_sha256 = "$DEFCONFIG_SHA"
 bootstrap_manifest = "$(basename "$BOOTSTRAP_MANIFEST_PATH")"
 bootstrap_manifest_sha256 = "$BOOTSTRAP_SHA"
+source_post_fakeroot = "$(basename "$ROOTFS_POST_FAKEROOT_SCRIPT")"
+source_post_fakeroot_sha256 = "$POST_FAKEROOT_SHA"
 assembled_tree_archive = "$(basename "$ROOTFS_TREE_ARCHIVE")"
 assembled_tree_archive_sha256 = "$TREE_SHA"
+staged_seal_method = "$SEAL_METHOD"
+staged_seal_required = $( [ "$SEAL_REQUIRED" -eq 0 ] && printf 'false' || printf 'true' )
 seal_method = "$SEAL_METHOD"
 seal_required = $( [ "$SEAL_REQUIRED" -eq 0 ] && printf 'false' || printf 'true' )
 image_name = "rootfs.ext4"
 build_log = "$BUILD_LOG"
 artifact_root = "$ARTIFACT_DIR"
 EOF
+
+if [ -n "$NORMAL_SEED_TREE_MANIFEST_FILE" ]; then
+  {
+    printf 'normal_seed_tree_manifest = "%s"\n' "$NORMAL_SEED_TREE_MANIFEST_FILE"
+    printf 'normal_seed_tree_manifest_sha256 = "%s"\n' "$NORMAL_SEED_TREE_MANIFEST_SHA"
+  } >>"$ARTIFACT_DIR/manifest.toml"
+fi
+
+if [ -n "$ROOTFS_OVERLAY_MANIFEST_FILE" ]; then
+  {
+    printf 'mutable_overlay_manifest = "%s"\n' "$ROOTFS_OVERLAY_MANIFEST_FILE"
+    printf 'mutable_overlay_manifest_sha256 = "%s"\n' "$ROOTFS_OVERLAY_MANIFEST_SHA"
+  } >>"$ARTIFACT_DIR/manifest.toml"
+fi
 
 if [ -n "$IMAGE_FILE_OUTPUT" ]; then
   printf 'image_file = "%s"\n' "$IMAGE_FILE_OUTPUT" >>"$ARTIFACT_DIR/manifest.toml"

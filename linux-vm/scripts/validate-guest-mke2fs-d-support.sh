@@ -173,6 +173,9 @@ fi
 
 grep -Fq 'seal_method = "guest-mke2fs-d"' "$candidate_manifest"
 grep -Fq 'seal_required = false' "$candidate_manifest"
+grep -Fq 'staged_seal_method = "guest-mke2fs-d"' "$candidate_manifest"
+grep -Fq 'source_post_fakeroot = "normal-post-fakeroot.sh"' "$candidate_manifest"
+grep -Fq 'normal_seed_tree_manifest = "normal-rootfs-tree.manifest"' "$candidate_manifest"
 
 shutdown_vm "$known_hosts_file"
 echo "Validated in-guest mke2fs -d support and guest-native rootfs sealing."

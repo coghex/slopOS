@@ -8,6 +8,7 @@ KERNEL_SOURCE_ARCHIVE="${KERNEL_SOURCE_ARCHIVE:-}"
 KERNEL_DEFCONFIG_PATH="${KERNEL_DEFCONFIG_PATH:-$KERNEL_INPUT_ROOT/slopos_aarch64_virt_defconfig}"
 KERNEL_CONFIG_PATH="${KERNEL_CONFIG_PATH:-$KERNEL_INPUT_ROOT/linux.config}"
 KERNEL_PATCH_DIR="${KERNEL_PATCH_DIR:-$KERNEL_INPUT_ROOT/patches/linux}"
+KERNEL_INPUT_METADATA_PATH="${KERNEL_INPUT_METADATA_PATH:-$KERNEL_INPUT_ROOT/kernel-inputs.toml}"
 BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 WORK_ROOT="${WORK_ROOT:-$KERNEL_STATE_ROOT/build}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-$KERNEL_STATE_ROOT/artifacts}"
@@ -21,7 +22,7 @@ KEEP_WORKDIR=0
 
 usage() {
   cat >&2 <<'EOF'
-Usage: slopos-build-kernel-artifacts [--source-archive <path>] [--defconfig <path>] [--config <path>] [--patch-dir <path>] [--build-jobs <count>] [--keep-workdir]
+Usage: slopos-build-kernel-artifacts [--source-archive <path>] [--defconfig <path>] [--config <path>] [--patch-dir <path>] [--input-metadata <path>] [--build-jobs <count>] [--keep-workdir]
 
 Builds a guest-native ARM64 kernel Image plus modules using the managed toolchain
 and stores the validated artifact set under /Volumes/slopos-data/kernel.
@@ -33,6 +34,37 @@ require_exec() {
     echo "Missing required tool: $1" >&2
     exit 1
   fi
+}
+
+sha256_file() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+write_tree_manifest() {
+  source_dir="$1"
+  manifest_path="$2"
+  python3 - "$source_dir" "$manifest_path" <<'PY'
+import hashlib
+import os
+import pathlib
+import sys
+
+source_dir = pathlib.Path(sys.argv[1])
+manifest_path = pathlib.Path(sys.argv[2])
+
+with manifest_path.open("w", encoding="utf-8") as fh:
+    fh.write(f"root = {source_dir.name}\n")
+    for path in sorted(source_dir.rglob("*")):
+        rel = path.relative_to(source_dir).as_posix()
+        if path.is_symlink():
+            fh.write(f"symlink {rel} -> {os.readlink(path)}\n")
+            continue
+        if path.is_dir():
+            fh.write(f"dir {rel}\n")
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        fh.write(f"file {digest} {rel}\n")
+PY
 }
 
 while [ $# -gt 0 ]; do
@@ -69,6 +101,14 @@ while [ $# -gt 0 ]; do
       KERNEL_PATCH_DIR="$2"
       shift 2
       ;;
+    --input-metadata)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      KERNEL_INPUT_METADATA_PATH="$2"
+      shift 2
+      ;;
     --build-jobs)
       if [ $# -lt 2 ]; then
         usage
@@ -102,11 +142,11 @@ if [ -z "$KERNEL_SOURCE_ARCHIVE" ]; then
   fi
 fi
 
-for tool in gcc make perl bc bison flex openssl tar xz patch sha256sum file find awk sed; do
+for tool in gcc make perl bc bison flex m4 openssl tar xz patch sha256sum file find awk sed python3; do
   require_exec "$tool"
 done
 
-for path in "$KERNEL_SOURCE_ARCHIVE" "$KERNEL_CONFIG_PATH"; do
+for path in "$KERNEL_SOURCE_ARCHIVE" "$KERNEL_CONFIG_PATH" "$KERNEL_INPUT_METADATA_PATH"; do
   if [ ! -f "$path" ]; then
     echo "Missing required input: $path" >&2
     exit 1
@@ -240,6 +280,7 @@ fi
 ARTIFACT_ID="${KERNEL_RELEASE}-${timestamp}"
 ARTIFACT_DIR="$ARTIFACT_ROOT/$ARTIFACT_ID"
 MODULE_DEST="$ARTIFACT_DIR/modules"
+INPUT_COPY_ROOT="$ARTIFACT_DIR/inputs"
 mkdir -p "$ARTIFACT_DIR" "$ARTIFACT_DIR/inputs" "$MODULE_DEST"
 
 run_logged "Copying kernel Image" cp "$OUTPUT_ROOT/arch/arm64/boot/Image" "$ARTIFACT_DIR/Image"
@@ -248,20 +289,29 @@ run_logged "Copying resolved kernel config" cp "$OUTPUT_ROOT/.config" "$ARTIFACT
 if [ -f "$OUTPUT_ROOT/Module.symvers" ]; then
   run_logged "Copying Module.symvers" cp "$OUTPUT_ROOT/Module.symvers" "$ARTIFACT_DIR/Module.symvers"
 fi
-run_logged "Recording source defconfig" cp "$KERNEL_DEFCONFIG_PATH" "$ARTIFACT_DIR/inputs/$(basename "$KERNEL_DEFCONFIG_PATH")"
-run_logged "Recording source kernel config" cp "$KERNEL_CONFIG_PATH" "$ARTIFACT_DIR/inputs/$(basename "$KERNEL_CONFIG_PATH")"
+run_logged "Recording staged kernel input metadata" cp "$KERNEL_INPUT_METADATA_PATH" "$INPUT_COPY_ROOT/$(basename "$KERNEL_INPUT_METADATA_PATH")"
+run_logged "Recording source defconfig" cp "$KERNEL_DEFCONFIG_PATH" "$INPUT_COPY_ROOT/$(basename "$KERNEL_DEFCONFIG_PATH")"
+run_logged "Recording source kernel config" cp "$KERNEL_CONFIG_PATH" "$INPUT_COPY_ROOT/$(basename "$KERNEL_CONFIG_PATH")"
 if [ -d "$KERNEL_PATCH_DIR" ]; then
-  mkdir -p "$ARTIFACT_DIR/inputs/patches"
+  mkdir -p "$INPUT_COPY_ROOT/patches"
   if [ "$PATCH_COUNT" -gt 0 ]; then
     while IFS= read -r patch_path; do
       [ -n "$patch_path" ] || continue
-      run_logged "Recording $(basename "$patch_path")" cp "$patch_path" "$ARTIFACT_DIR/inputs/patches/$(basename "$patch_path")"
+      run_logged "Recording $(basename "$patch_path")" cp "$patch_path" "$INPUT_COPY_ROOT/patches/$(basename "$patch_path")"
     done <"$patch_list_file"
   fi
+fi
+write_tree_manifest "$KERNEL_INPUT_ROOT" "$INPUT_COPY_ROOT/input-root.manifest"
+if [ -d "$INPUT_COPY_ROOT/patches" ]; then
+  write_tree_manifest "$INPUT_COPY_ROOT/patches" "$INPUT_COPY_ROOT/patches.manifest"
+else
+  mkdir -p "$INPUT_COPY_ROOT/patches"
+  write_tree_manifest "$INPUT_COPY_ROOT/patches" "$INPUT_COPY_ROOT/patches.manifest"
 fi
 
 run_logged "Installing kernel modules" make -C "$KERNEL_SOURCE_DIR" O="$OUTPUT_ROOT" ARCH=arm64 DEPMOD=true INSTALL_MOD_PATH="$MODULE_DEST" modules_install
 rm -f "$MODULE_DEST/lib/modules/$KERNEL_RELEASE/build" "$MODULE_DEST/lib/modules/$KERNEL_RELEASE/source"
+run_logged "Packaging kernel modules archive" sh -c "tar -C '$MODULE_DEST' -cf - 'lib/modules/$KERNEL_RELEASE' | xz -T1 -c > '$ARTIFACT_DIR/modules.tar.xz'"
 
 set_phase "validate"
 if [ ! -s "$ARTIFACT_DIR/Image" ]; then
@@ -277,24 +327,44 @@ if [ "$MODULE_COUNT" -le 0 ]; then
   echo "No kernel modules were installed under $MODULE_DEST/lib/modules/$KERNEL_RELEASE" >&2
   exit 1
 fi
+if [ ! -s "$ARTIFACT_DIR/modules.tar.xz" ]; then
+  echo "Packaged kernel modules archive is missing or empty: $ARTIFACT_DIR/modules.tar.xz" >&2
+  exit 1
+fi
 IMAGE_FILE_OUTPUT="$(file "$ARTIFACT_DIR/Image" | sed 's/"/\\"/g')"
-DEFCONFIG_SHA="$(sha256sum "$KERNEL_DEFCONFIG_PATH" | awk '{print $1}')"
-CONFIG_SHA="$(sha256sum "$KERNEL_CONFIG_PATH" | awk '{print $1}')"
-ARCHIVE_SHA="$(sha256sum "$KERNEL_SOURCE_ARCHIVE" | awk '{print $1}')"
-PATCH_SHA_FILE="$ARTIFACT_DIR/inputs/patches.sha256"
-: >"$PATCH_SHA_FILE"
-if [ "$PATCH_COUNT" -gt 0 ]; then
-  while IFS= read -r patch_path; do
-    [ -n "$patch_path" ] || continue
-    sha256sum "$patch_path" >>"$PATCH_SHA_FILE"
-  done <"$patch_list_file"
+INPUT_METADATA_NAME="$(basename "$KERNEL_INPUT_METADATA_PATH")"
+INPUT_METADATA_SHA="$(sha256_file "$KERNEL_INPUT_METADATA_PATH")"
+INPUT_ROOT_MANIFEST_NAME="input-root.manifest"
+INPUT_ROOT_MANIFEST_SHA="$(sha256_file "$INPUT_COPY_ROOT/$INPUT_ROOT_MANIFEST_NAME")"
+PATCH_MANIFEST_NAME="patches.manifest"
+PATCH_MANIFEST_SHA="$(sha256_file "$INPUT_COPY_ROOT/$PATCH_MANIFEST_NAME")"
+DEFCONFIG_SHA="$(sha256_file "$KERNEL_DEFCONFIG_PATH")"
+CONFIG_SHA="$(sha256_file "$KERNEL_CONFIG_PATH")"
+ARCHIVE_SHA="$(sha256_file "$KERNEL_SOURCE_ARCHIVE")"
+IMAGE_SHA="$(sha256_file "$ARTIFACT_DIR/Image")"
+SYSTEM_MAP_SHA="$(sha256_file "$ARTIFACT_DIR/System.map")"
+RESOLVED_CONFIG_SHA="$(sha256_file "$ARTIFACT_DIR/linux.config")"
+MODULES_ARCHIVE_SHA="$(sha256_file "$ARTIFACT_DIR/modules.tar.xz")"
+MODULE_SYMVERS_FIELDS=""
+if [ -f "$ARTIFACT_DIR/Module.symvers" ]; then
+  MODULE_SYMVERS_SHA="$(sha256_file "$ARTIFACT_DIR/Module.symvers")"
+  MODULE_SYMVERS_FIELDS="
+module_symvers_name = \"Module.symvers\"
+module_symvers_sha256 = \"$MODULE_SYMVERS_SHA\""
 fi
 
 cat >"$ARTIFACT_DIR/manifest.toml" <<EOF
-schema_version = 1
+schema_version = 3
 artifact_id = "$ARTIFACT_ID"
 built_at = "$timestamp"
 kernel_release = "$KERNEL_RELEASE"
+input_root = "$KERNEL_INPUT_ROOT"
+staged_input_metadata = "$INPUT_METADATA_NAME"
+staged_input_metadata_sha256 = "$INPUT_METADATA_SHA"
+staged_input_root_manifest = "$INPUT_ROOT_MANIFEST_NAME"
+staged_input_root_manifest_sha256 = "$INPUT_ROOT_MANIFEST_SHA"
+staged_patch_manifest = "$PATCH_MANIFEST_NAME"
+staged_patch_manifest_sha256 = "$PATCH_MANIFEST_SHA"
 source_archive = "$(basename "$KERNEL_SOURCE_ARCHIVE")"
 source_archive_sha256 = "$ARCHIVE_SHA"
 source_defconfig = "$(basename "$KERNEL_DEFCONFIG_PATH")"
@@ -303,7 +373,15 @@ source_kernel_config = "$(basename "$KERNEL_CONFIG_PATH")"
 source_kernel_config_sha256 = "$CONFIG_SHA"
 patch_count = $PATCH_COUNT
 module_count = $MODULE_COUNT
+image_name = "Image"
+image_sha256 = "$IMAGE_SHA"
 image_file = "$IMAGE_FILE_OUTPUT"
+modules_archive_name = "modules.tar.xz"
+modules_archive_sha256 = "$MODULES_ARCHIVE_SHA"
+system_map_name = "System.map"
+system_map_sha256 = "$SYSTEM_MAP_SHA"
+resolved_config_name = "linux.config"
+resolved_config_sha256 = "$RESOLVED_CONFIG_SHA"$MODULE_SYMVERS_FIELDS
 build_log = "$BUILD_LOG"
 artifact_root = "$ARTIFACT_DIR"
 EOF

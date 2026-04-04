@@ -7,8 +7,15 @@ IDENTITY_PATH_FILE="$ROOT_DIR/qemu/guest-ssh-identity.path"
 HOST_ROOTFS_CANDIDATE_ROOT="${HOST_GUEST_ROOTFS_CANDIDATE_ROOT:-$ROOT_DIR/artifacts/guest-rootfs-candidate}"
 HOST_KERNEL_CANDIDATE_ROOT="${HOST_GUEST_KERNEL_CANDIDATE_ROOT:-$ROOT_DIR/artifacts/guest-kernel-candidate}"
 ROOTFS_CANDIDATE_IMAGE="${HOST_GUEST_ROOTFS_CANDIDATE_IMAGE:-$HOST_ROOTFS_CANDIDATE_ROOT/current/rootfs.ext4}"
+ROOTFS_CANDIDATE_MANIFEST="${HOST_GUEST_ROOTFS_CANDIDATE_MANIFEST:-$HOST_ROOTFS_CANDIDATE_ROOT/current/manifest.toml}"
+ROOTFS_CANDIDATE_HANDOFF="${HOST_GUEST_ROOTFS_CANDIDATE_HANDOFF:-$HOST_ROOTFS_CANDIDATE_ROOT/current/host-handoff.toml}"
 KERNEL_CANDIDATE_IMAGE="${HOST_GUEST_KERNEL_CANDIDATE_IMAGE:-$HOST_KERNEL_CANDIDATE_ROOT/current/Image}"
 KERNEL_CANDIDATE_MANIFEST="${HOST_GUEST_KERNEL_CANDIDATE_MANIFEST:-$HOST_KERNEL_CANDIDATE_ROOT/current/manifest.toml}"
+KERNEL_CANDIDATE_HANDOFF="${HOST_GUEST_KERNEL_CANDIDATE_HANDOFF:-$HOST_KERNEL_CANDIDATE_ROOT/current/host-handoff.toml}"
+KERNEL_CANDIDATE_SYSTEM_MAP="${HOST_GUEST_KERNEL_CANDIDATE_SYSTEM_MAP:-$HOST_KERNEL_CANDIDATE_ROOT/current/System.map}"
+KERNEL_CANDIDATE_CONFIG="${HOST_GUEST_KERNEL_CANDIDATE_CONFIG:-$HOST_KERNEL_CANDIDATE_ROOT/current/linux.config}"
+KERNEL_CANDIDATE_MODULES_ARCHIVE="${HOST_GUEST_KERNEL_CANDIDATE_MODULES_ARCHIVE:-$HOST_KERNEL_CANDIDATE_ROOT/current/modules.tar.xz}"
+KERNEL_CANDIDATE_MODULE_SYMVERS="${HOST_GUEST_KERNEL_CANDIDATE_MODULE_SYMVERS:-$HOST_KERNEL_CANDIDATE_ROOT/current/Module.symvers}"
 DEFAULT_VALIDATE_SSH_PORT="$(python3 - <<'PY'
 import random
 import socket
@@ -66,24 +73,138 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-for var_name in ROOTFS_CANDIDATE_IMAGE KERNEL_CANDIDATE_IMAGE KERNEL_CANDIDATE_MANIFEST; do
+for var_name in ROOTFS_CANDIDATE_IMAGE ROOTFS_CANDIDATE_MANIFEST ROOTFS_CANDIDATE_HANDOFF KERNEL_CANDIDATE_IMAGE KERNEL_CANDIDATE_MANIFEST KERNEL_CANDIDATE_HANDOFF KERNEL_CANDIDATE_SYSTEM_MAP KERNEL_CANDIDATE_CONFIG KERNEL_CANDIDATE_MODULES_ARCHIVE KERNEL_CANDIDATE_MODULE_SYMVERS; do
   var_value="${!var_name}"
   if [[ "$var_value" != /* ]]; then
     printf -v "$var_name" '%s/%s' "$ROOT_DIR" "$var_value"
   fi
 done
 
-if [[ ! -f "$ROOTFS_CANDIDATE_IMAGE" ]]; then
-  echo "Missing host-side guest rootfs candidate: $ROOTFS_CANDIDATE_IMAGE" >&2
-  echo "Run ./scripts/validate-guest-rootfs-artifacts.sh first." >&2
-  exit 1
-fi
+for required in "$ROOTFS_CANDIDATE_IMAGE" "$ROOTFS_CANDIDATE_MANIFEST" "$ROOTFS_CANDIDATE_HANDOFF"; do
+  if [[ ! -f "$required" ]]; then
+    echo "Missing host-side guest rootfs candidate input: $required" >&2
+    echo "Run ./scripts/validate-guest-rootfs-artifacts.sh first." >&2
+    exit 1
+  fi
+done
 
-if [[ ! -f "$KERNEL_CANDIDATE_IMAGE" || ! -f "$KERNEL_CANDIDATE_MANIFEST" ]]; then
-  echo "Missing host-side guest kernel candidate under $HOST_KERNEL_CANDIDATE_ROOT/current" >&2
-  echo "Run ./scripts/promote-guest-kernel-candidate.sh first." >&2
-  exit 1
-fi
+for required in "$KERNEL_CANDIDATE_IMAGE" "$KERNEL_CANDIDATE_MANIFEST" "$KERNEL_CANDIDATE_HANDOFF" "$KERNEL_CANDIDATE_SYSTEM_MAP" "$KERNEL_CANDIDATE_CONFIG" "$KERNEL_CANDIDATE_MODULES_ARCHIVE"; do
+  if [[ ! -f "$required" ]]; then
+    echo "Missing host-side guest kernel candidate input: $required" >&2
+    echo "Run ./scripts/promote-guest-kernel-candidate.sh first." >&2
+    exit 1
+  fi
+done
+
+python3 - "$ROOTFS_CANDIDATE_IMAGE" "$ROOTFS_CANDIDATE_MANIFEST" "$ROOTFS_CANDIDATE_HANDOFF" "$KERNEL_CANDIDATE_IMAGE" "$KERNEL_CANDIDATE_MANIFEST" "$KERNEL_CANDIDATE_HANDOFF" "$KERNEL_CANDIDATE_SYSTEM_MAP" "$KERNEL_CANDIDATE_CONFIG" "$KERNEL_CANDIDATE_MODULES_ARCHIVE" "$KERNEL_CANDIDATE_MODULE_SYMVERS" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+rootfs_image = pathlib.Path(sys.argv[1])
+rootfs_manifest = pathlib.Path(sys.argv[2])
+rootfs_handoff = pathlib.Path(sys.argv[3])
+kernel_image = pathlib.Path(sys.argv[4])
+kernel_manifest = pathlib.Path(sys.argv[5])
+kernel_handoff = pathlib.Path(sys.argv[6])
+kernel_system_map = pathlib.Path(sys.argv[7])
+kernel_config = pathlib.Path(sys.argv[8])
+kernel_modules_archive = pathlib.Path(sys.argv[9])
+kernel_module_symvers = pathlib.Path(sys.argv[10]) if sys.argv[10] else None
+
+def parse_toml(path: pathlib.Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        data[key] = value
+    return data
+
+rootfs_manifest_data = parse_toml(rootfs_manifest)
+rootfs_handoff_data = parse_toml(rootfs_handoff)
+kernel_manifest_data = parse_toml(kernel_manifest)
+kernel_handoff_data = parse_toml(kernel_handoff)
+
+if rootfs_manifest_data.get("schema_version") != "2":
+    raise SystemExit("rootfs candidate manifest schema_version is not 2")
+for key, expected in {
+    "source_post_fakeroot": "normal-post-fakeroot.sh",
+    "normal_seed_tree_manifest": "normal-rootfs-tree.manifest",
+    "image_name": "rootfs.ext4",
+}.items():
+    if rootfs_manifest_data.get(key) != expected:
+        raise SystemExit(f"unexpected rootfs candidate manifest {key}: {rootfs_manifest_data.get(key)!r}")
+if "staged_seal_method" not in rootfs_manifest_data:
+    raise SystemExit("rootfs candidate manifest is missing staged_seal_method")
+
+rootfs_image_sha = hashlib.sha256(rootfs_image.read_bytes()).hexdigest()
+rootfs_manifest_sha = hashlib.sha256(rootfs_manifest.read_bytes()).hexdigest()
+if rootfs_handoff_data.get("image_sha256") != rootfs_image_sha:
+    raise SystemExit("rootfs candidate handoff image_sha256 does not match candidate image")
+if rootfs_handoff_data.get("manifest_sha256") != rootfs_manifest_sha:
+    raise SystemExit("rootfs candidate handoff manifest_sha256 does not match candidate manifest")
+
+if kernel_manifest_data.get("schema_version") != "3":
+    raise SystemExit("kernel candidate manifest schema_version is not 3")
+for key, expected in {
+    "image_name": "Image",
+    "modules_archive_name": "modules.tar.xz",
+    "system_map_name": "System.map",
+    "resolved_config_name": "linux.config",
+}.items():
+    if kernel_manifest_data.get(key) != expected:
+        raise SystemExit(f"unexpected kernel candidate manifest {key}: {kernel_manifest_data.get(key)!r}")
+for required_key in (
+    "input_root",
+    "staged_input_metadata",
+    "staged_input_root_manifest",
+    "staged_patch_manifest",
+):
+    if required_key not in kernel_manifest_data:
+        raise SystemExit(f"kernel candidate manifest is missing {required_key}")
+
+kernel_image_sha = hashlib.sha256(kernel_image.read_bytes()).hexdigest()
+kernel_manifest_sha = hashlib.sha256(kernel_manifest.read_bytes()).hexdigest()
+kernel_modules_archive_sha = hashlib.sha256(kernel_modules_archive.read_bytes()).hexdigest()
+kernel_system_map_sha = hashlib.sha256(kernel_system_map.read_bytes()).hexdigest()
+kernel_config_sha = hashlib.sha256(kernel_config.read_bytes()).hexdigest()
+if kernel_manifest_data.get("image_sha256") != kernel_image_sha:
+    raise SystemExit("kernel candidate manifest image_sha256 does not match candidate image")
+if kernel_manifest_data.get("modules_archive_sha256") != kernel_modules_archive_sha:
+    raise SystemExit("kernel candidate manifest modules_archive_sha256 does not match candidate modules archive")
+if kernel_manifest_data.get("system_map_sha256") != kernel_system_map_sha:
+    raise SystemExit("kernel candidate manifest system_map_sha256 does not match candidate System.map")
+if kernel_manifest_data.get("resolved_config_sha256") != kernel_config_sha:
+    raise SystemExit("kernel candidate manifest resolved_config_sha256 does not match candidate linux.config")
+
+if kernel_handoff_data.get("manifest_schema_version") != kernel_manifest_data.get("schema_version"):
+    raise SystemExit("kernel candidate handoff manifest_schema_version does not match kernel manifest")
+if kernel_handoff_data.get("image_sha256") != kernel_image_sha:
+    raise SystemExit("kernel candidate handoff image_sha256 does not match candidate image")
+if kernel_handoff_data.get("manifest_sha256") != kernel_manifest_sha:
+    raise SystemExit("kernel candidate handoff manifest_sha256 does not match candidate manifest")
+if kernel_handoff_data.get("modules_archive_sha256") != kernel_modules_archive_sha:
+    raise SystemExit("kernel candidate handoff modules_archive_sha256 does not match candidate modules archive")
+if kernel_handoff_data.get("system_map_sha256") != kernel_system_map_sha:
+    raise SystemExit("kernel candidate handoff system_map_sha256 does not match candidate System.map")
+if kernel_handoff_data.get("resolved_config_sha256") != kernel_config_sha:
+    raise SystemExit("kernel candidate handoff resolved_config_sha256 does not match candidate linux.config")
+if kernel_handoff_data.get("kernel_release") != kernel_manifest_data.get("kernel_release"):
+    raise SystemExit("kernel candidate handoff kernel_release does not match kernel manifest")
+
+if kernel_module_symvers is not None and kernel_module_symvers.is_file():
+    kernel_module_symvers_sha = hashlib.sha256(kernel_module_symvers.read_bytes()).hexdigest()
+    if kernel_manifest_data.get("module_symvers_sha256") != kernel_module_symvers_sha:
+        raise SystemExit("kernel candidate manifest module_symvers_sha256 does not match candidate Module.symvers")
+    if kernel_handoff_data.get("module_symvers_sha256") != kernel_module_symvers_sha:
+        raise SystemExit("kernel candidate handoff module_symvers_sha256 does not match candidate Module.symvers")
+PY
 
 if [[ ! -f "$IDENTITY_PATH_FILE" ]]; then
   echo "Missing guest SSH identity path file: $IDENTITY_PATH_FILE" >&2

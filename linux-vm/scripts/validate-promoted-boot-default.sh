@@ -4,11 +4,20 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_FILE="$ROOT_DIR/configs/host-guest.env"
 IDENTITY_PATH_FILE="$ROOT_DIR/qemu/guest-ssh-identity.path"
+BOOT_SELECTION_HELPER="$ROOT_DIR/scripts/boot-selection.sh"
 HOST_PROMOTED_BOOT_ROOT="${HOST_GUEST_PROMOTED_BOOT_ROOT:-$ROOT_DIR/artifacts/guest-boot-promoted}"
 PROMOTED_BOOT_CURRENT="$HOST_PROMOTED_BOOT_ROOT/current"
 PROMOTED_ROOTFS_IMAGE="$PROMOTED_BOOT_CURRENT/rootfs.ext4"
 PROMOTED_KERNEL_IMAGE="$PROMOTED_BOOT_CURRENT/Image"
+PROMOTED_ROOTFS_MANIFEST="$PROMOTED_BOOT_CURRENT/rootfs.manifest.toml"
+PROMOTED_ROOTFS_HANDOFF="$PROMOTED_BOOT_CURRENT/rootfs.host-handoff.toml"
 PROMOTED_KERNEL_MANIFEST="$PROMOTED_BOOT_CURRENT/kernel.manifest.toml"
+PROMOTED_KERNEL_HANDOFF="$PROMOTED_BOOT_CURRENT/kernel.host-handoff.toml"
+PROMOTED_KERNEL_SYSTEM_MAP="$PROMOTED_BOOT_CURRENT/System.map"
+PROMOTED_KERNEL_CONFIG="$PROMOTED_BOOT_CURRENT/linux.config"
+PROMOTED_KERNEL_MODULES_ARCHIVE="$PROMOTED_BOOT_CURRENT/modules.tar.xz"
+PROMOTED_KERNEL_MODULE_SYMVERS="$PROMOTED_BOOT_CURRENT/Module.symvers"
+PROMOTION_METADATA="$PROMOTED_BOOT_CURRENT/promotion.toml"
 BUILDROOT_KERNEL_IMAGE="$ROOT_DIR/artifacts/buildroot-output/images/Image"
 BUILDROOT_ROOTFS_IMAGE="$ROOT_DIR/artifacts/buildroot-output/images/rootfs.ext4"
 BUILDROOT_ROOTFS_EXT2_IMAGE="$ROOT_DIR/artifacts/buildroot-output/images/rootfs.ext2"
@@ -71,12 +80,30 @@ if [[ ! -f "$IDENTITY_PATH_FILE" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$BOOT_SELECTION_HELPER" ]]; then
+  echo "Missing boot selection helper: $BOOT_SELECTION_HELPER" >&2
+  exit 1
+fi
+
 for var_name in \
   HOST_PROMOTED_BOOT_ROOT \
   PROMOTED_BOOT_CURRENT \
   PROMOTED_ROOTFS_IMAGE \
   PROMOTED_KERNEL_IMAGE \
-  PROMOTED_KERNEL_MANIFEST; do
+  PROMOTED_ROOTFS_MANIFEST \
+  PROMOTED_ROOTFS_HANDOFF \
+  PROMOTED_KERNEL_MANIFEST \
+  PROMOTED_KERNEL_SYSTEM_MAP \
+  PROMOTED_KERNEL_CONFIG \
+  PROMOTED_KERNEL_MODULES_ARCHIVE \
+  PROMOTED_KERNEL_MODULE_SYMVERS; do
+  var_value="${!var_name}"
+  if [[ "$var_value" != /* ]]; then
+    printf -v "$var_name" '%s/%s' "$ROOT_DIR" "$var_value"
+  fi
+done
+
+for var_name in PROMOTED_KERNEL_HANDOFF PROMOTION_METADATA; do
   var_value="${!var_name}"
   if [[ "$var_value" != /* ]]; then
     printf -v "$var_name" '%s/%s' "$ROOT_DIR" "$var_value"
@@ -90,7 +117,14 @@ fi
 for required in \
   "$PROMOTED_ROOTFS_IMAGE" \
   "$PROMOTED_KERNEL_IMAGE" \
+  "$PROMOTED_ROOTFS_MANIFEST" \
+  "$PROMOTED_ROOTFS_HANDOFF" \
   "$PROMOTED_KERNEL_MANIFEST" \
+  "$PROMOTED_KERNEL_HANDOFF" \
+  "$PROMOTED_KERNEL_SYSTEM_MAP" \
+  "$PROMOTED_KERNEL_CONFIG" \
+  "$PROMOTED_KERNEL_MODULES_ARCHIVE" \
+  "$PROMOTION_METADATA" \
   "$BUILDROOT_KERNEL_IMAGE" \
   "$BUILDROOT_ROOTFS_IMAGE"; do
   if [[ ! -f "$required" ]]; then
@@ -98,6 +132,139 @@ for required in \
     exit 1
   fi
 done
+
+# shellcheck disable=SC1090
+source "$BOOT_SELECTION_HELPER"
+HOST_GUEST_PROMOTED_BOOT_ROOT="$HOST_PROMOTED_BOOT_ROOT"
+resolve_promoted_boot_paths
+
+python3 - "$PROMOTED_ROOTFS_IMAGE" "$PROMOTED_ROOTFS_MANIFEST" "$PROMOTED_ROOTFS_HANDOFF" "$PROMOTED_KERNEL_IMAGE" "$PROMOTED_KERNEL_MANIFEST" "$PROMOTED_KERNEL_HANDOFF" "$PROMOTED_KERNEL_SYSTEM_MAP" "$PROMOTED_KERNEL_CONFIG" "$PROMOTED_KERNEL_MODULES_ARCHIVE" "$PROMOTED_KERNEL_MODULE_SYMVERS" "$PROMOTION_METADATA" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+rootfs_image = pathlib.Path(sys.argv[1])
+rootfs_manifest = pathlib.Path(sys.argv[2])
+rootfs_handoff = pathlib.Path(sys.argv[3])
+kernel_image = pathlib.Path(sys.argv[4])
+kernel_manifest = pathlib.Path(sys.argv[5])
+kernel_handoff = pathlib.Path(sys.argv[6])
+kernel_system_map = pathlib.Path(sys.argv[7])
+kernel_config = pathlib.Path(sys.argv[8])
+kernel_modules_archive = pathlib.Path(sys.argv[9])
+kernel_module_symvers = pathlib.Path(sys.argv[10])
+promotion = pathlib.Path(sys.argv[11])
+
+def parse_toml(path: pathlib.Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        data[key] = value
+    return data
+
+rootfs_manifest_data = parse_toml(rootfs_manifest)
+rootfs_handoff_data = parse_toml(rootfs_handoff)
+kernel_manifest_data = parse_toml(kernel_manifest)
+kernel_handoff_data = parse_toml(kernel_handoff)
+promotion_data = parse_toml(promotion)
+
+if rootfs_manifest_data.get("schema_version") != "2":
+    raise SystemExit("promoted rootfs manifest schema_version is not 2")
+for key, expected in {
+    "source_post_fakeroot": "normal-post-fakeroot.sh",
+    "normal_seed_tree_manifest": "normal-rootfs-tree.manifest",
+    "image_name": "rootfs.ext4",
+}.items():
+    if rootfs_manifest_data.get(key) != expected:
+        raise SystemExit(f"unexpected promoted rootfs manifest {key}: {rootfs_manifest_data.get(key)!r}")
+if "staged_seal_method" not in rootfs_manifest_data:
+    raise SystemExit("promoted rootfs manifest is missing staged_seal_method")
+
+rootfs_image_sha = hashlib.sha256(rootfs_image.read_bytes()).hexdigest()
+rootfs_manifest_sha = hashlib.sha256(rootfs_manifest.read_bytes()).hexdigest()
+kernel_system_map_sha = hashlib.sha256(kernel_system_map.read_bytes()).hexdigest()
+kernel_config_sha = hashlib.sha256(kernel_config.read_bytes()).hexdigest()
+kernel_image_sha = hashlib.sha256(kernel_image.read_bytes()).hexdigest()
+kernel_manifest_sha = hashlib.sha256(kernel_manifest.read_bytes()).hexdigest()
+kernel_modules_archive_sha = hashlib.sha256(kernel_modules_archive.read_bytes()).hexdigest()
+
+if kernel_manifest_data.get("schema_version") != "3":
+    raise SystemExit("promoted kernel manifest schema_version is not 3")
+for key, expected in {
+    "image_name": "Image",
+    "modules_archive_name": "modules.tar.xz",
+    "system_map_name": "System.map",
+    "resolved_config_name": "linux.config",
+}.items():
+    if kernel_manifest_data.get(key) != expected:
+        raise SystemExit(f"unexpected promoted kernel manifest {key}: {kernel_manifest_data.get(key)!r}")
+for required_key in (
+    "input_root",
+    "staged_input_metadata",
+    "staged_input_root_manifest",
+    "staged_patch_manifest",
+):
+    if required_key not in kernel_manifest_data:
+        raise SystemExit(f"promoted kernel manifest is missing {required_key}")
+if kernel_manifest_data.get("image_sha256") != kernel_image_sha:
+    raise SystemExit("promoted kernel manifest image_sha256 does not match promoted kernel image")
+if kernel_manifest_data.get("modules_archive_sha256") != kernel_modules_archive_sha:
+    raise SystemExit("promoted kernel manifest modules_archive_sha256 does not match promoted modules archive")
+if kernel_manifest_data.get("system_map_sha256") != kernel_system_map_sha:
+    raise SystemExit("promoted kernel manifest system_map_sha256 does not match promoted System.map")
+if kernel_manifest_data.get("resolved_config_sha256") != kernel_config_sha:
+    raise SystemExit("promoted kernel manifest resolved_config_sha256 does not match promoted linux.config")
+
+if rootfs_handoff_data.get("image_sha256") != rootfs_image_sha:
+    raise SystemExit("promoted rootfs handoff image_sha256 does not match promoted rootfs image")
+if rootfs_handoff_data.get("manifest_sha256") != rootfs_manifest_sha:
+    raise SystemExit("promoted rootfs handoff manifest_sha256 does not match promoted rootfs manifest")
+if kernel_handoff_data.get("manifest_schema_version") != kernel_manifest_data.get("schema_version"):
+    raise SystemExit("promoted kernel handoff manifest_schema_version does not match promoted kernel manifest")
+if kernel_handoff_data.get("image_sha256") != kernel_image_sha:
+    raise SystemExit("promoted kernel handoff image_sha256 does not match promoted kernel image")
+if kernel_handoff_data.get("manifest_sha256") != kernel_manifest_sha:
+    raise SystemExit("promoted kernel handoff manifest_sha256 does not match promoted kernel manifest")
+if kernel_handoff_data.get("modules_archive_sha256") != kernel_modules_archive_sha:
+    raise SystemExit("promoted kernel handoff modules_archive_sha256 does not match promoted modules archive")
+if kernel_handoff_data.get("system_map_sha256") != kernel_system_map_sha:
+    raise SystemExit("promoted kernel handoff system_map_sha256 does not match promoted System.map")
+if kernel_handoff_data.get("resolved_config_sha256") != kernel_config_sha:
+    raise SystemExit("promoted kernel handoff resolved_config_sha256 does not match promoted linux.config")
+if kernel_handoff_data.get("kernel_release") != kernel_manifest_data.get("kernel_release"):
+    raise SystemExit("promoted kernel handoff kernel_release does not match promoted kernel manifest")
+
+if kernel_module_symvers.is_file():
+    kernel_module_symvers_sha = hashlib.sha256(kernel_module_symvers.read_bytes()).hexdigest()
+    if kernel_manifest_data.get("module_symvers_sha256") != kernel_module_symvers_sha:
+        raise SystemExit("promoted kernel manifest module_symvers_sha256 does not match promoted Module.symvers")
+    if kernel_handoff_data.get("module_symvers_sha256") != kernel_module_symvers_sha:
+        raise SystemExit("promoted kernel handoff module_symvers_sha256 does not match promoted Module.symvers")
+
+for key, expected in {
+    "rootfs_image_sha256": rootfs_image_sha,
+    "rootfs_manifest_sha256": rootfs_manifest_sha,
+    "kernel_image_sha256": kernel_image_sha,
+    "kernel_manifest_sha256": kernel_manifest_sha,
+    "kernel_modules_archive_sha256": kernel_modules_archive_sha,
+    "kernel_system_map_sha256": kernel_system_map_sha,
+    "kernel_resolved_config_sha256": kernel_config_sha,
+}.items():
+    if promotion_data.get(key) != expected:
+        raise SystemExit(f"promotion metadata {key} does not match promoted artifact")
+
+if kernel_module_symvers.is_file():
+    kernel_module_symvers_sha = hashlib.sha256(kernel_module_symvers.read_bytes()).hexdigest()
+    if promotion_data.get("kernel_module_symvers_sha256") != kernel_module_symvers_sha:
+        raise SystemExit("promotion metadata kernel_module_symvers_sha256 does not match promoted Module.symvers")
+PY
 
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
@@ -258,6 +425,80 @@ boot_and_assert() {
   fi
 }
 
+assert_root_disk_boot_selection_metadata() {
+  local metadata_path="$1"
+  local expected_scope="$2"
+  local expected_rootfs_kind="$3"
+  local expected_rootfs_image="$4"
+  local expected_kernel_kind="$5"
+  local expected_kernel_image="$6"
+  local expected_promotion_root="$7"
+  local expected_promotion_metadata="$8"
+
+  if [[ ! -f "$metadata_path" ]]; then
+    echo "Missing root disk boot selection metadata: $metadata_path" >&2
+    exit 1
+  fi
+
+  python3 - "$metadata_path" "$expected_scope" "$expected_rootfs_kind" "$expected_rootfs_image" "$expected_kernel_kind" "$expected_kernel_image" "$expected_promotion_root" "$expected_promotion_metadata" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+metadata_path = pathlib.Path(sys.argv[1])
+expected_scope = sys.argv[2]
+expected_rootfs_kind = sys.argv[3]
+expected_rootfs_image = sys.argv[4]
+expected_kernel_kind = sys.argv[5]
+expected_kernel_image = sys.argv[6]
+expected_promotion_root = sys.argv[7]
+expected_promotion_metadata = sys.argv[8]
+
+data: dict[str, str] = {}
+for line in metadata_path.read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        continue
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if value.startswith('"') and value.endswith('"'):
+        value = value[1:-1]
+    data[key] = value
+
+for key, expected in {
+    "schema_version": "1",
+    "selected_by": "scripts/ensure-root-disk.sh",
+    "selection_scope": expected_scope,
+    "rootfs_source_kind": expected_rootfs_kind,
+    "rootfs_source_image": expected_rootfs_image,
+    "kernel_source_kind": expected_kernel_kind,
+    "kernel_image": expected_kernel_image,
+}.items():
+    if data.get(key) != expected:
+        raise SystemExit(f"unexpected root disk boot selection metadata {key}: {data.get(key)!r}")
+
+rootfs_sha = hashlib.sha256(pathlib.Path(expected_rootfs_image).read_bytes()).hexdigest()
+kernel_sha = hashlib.sha256(pathlib.Path(expected_kernel_image).read_bytes()).hexdigest()
+if data.get("rootfs_source_sha256") != rootfs_sha:
+    raise SystemExit("root disk boot selection metadata rootfs_source_sha256 does not match expected rootfs image")
+if data.get("kernel_image_sha256") != kernel_sha:
+    raise SystemExit("root disk boot selection metadata kernel_image_sha256 does not match expected kernel image")
+
+if expected_promotion_root:
+    if data.get("promotion_root") != expected_promotion_root:
+        raise SystemExit("root disk boot selection metadata promotion_root is unexpected")
+    if data.get("promotion_id") != pathlib.Path(expected_promotion_root).name:
+        raise SystemExit("root disk boot selection metadata promotion_id is unexpected")
+    if expected_promotion_metadata and data.get("promotion_metadata") != expected_promotion_metadata:
+        raise SystemExit("root disk boot selection metadata promotion_metadata is unexpected")
+else:
+    for key in ("promotion_root", "promotion_id", "promotion_metadata"):
+        if key in data:
+            raise SystemExit(f"root disk boot selection metadata unexpectedly contains {key}")
+PY
+}
+
 mkdir -p "$ROOT_DIR/qemu"
 TMPDIR_HOST="$(mktemp -d "$ROOT_DIR/qemu/validate-promoted-boot.XXXXXX")"
 
@@ -268,8 +509,8 @@ default_data_disk_image="$TMPDIR_HOST/default-data.img"
 
 boot_and_assert \
   "promoted default boot" \
-  "$PROMOTED_ROOTFS_IMAGE" \
-  "$PROMOTED_KERNEL_IMAGE" \
+  "$RESOLVED_PROMOTED_ROOTFS_IMAGE" \
+  "$RESOLVED_PROMOTED_KERNEL_IMAGE" \
   "$default_root_disk_image" \
   "$default_data_disk_image" \
   "$default_known_hosts_file" \
@@ -281,6 +522,15 @@ KNOWN_HOSTS_FILE="$default_known_hosts_file" \
   "$ROOT_DIR/scripts/ssh-guest.sh" "$remote_check"
 
 shutdown_vm "$default_known_hosts_file"
+assert_root_disk_boot_selection_metadata \
+  "${default_root_disk_image}.boot-selection.toml" \
+  "default" \
+  "promoted-default" \
+  "$RESOLVED_PROMOTED_ROOTFS_IMAGE" \
+  "promoted-default" \
+  "$RESOLVED_PROMOTED_KERNEL_IMAGE" \
+  "$RESOLVED_PROMOTED_BOOT_ROOT" \
+  "$RESOLVED_PROMOTED_BOOT_METADATA"
 
 override_known_hosts_file="$TMPDIR_HOST/override-known_hosts"
 override_qemu_log="$TMPDIR_HOST/override-normal-qemu.log"
@@ -298,7 +548,16 @@ boot_and_assert \
   "1"
 
 shutdown_vm "$override_known_hosts_file"
+assert_root_disk_boot_selection_metadata \
+  "${override_root_disk_image}.boot-selection.toml" \
+  "explicit" \
+  "explicit" \
+  "$BUILDROOT_ROOTFS_IMAGE" \
+  "explicit" \
+  "$BUILDROOT_KERNEL_IMAGE" \
+  "" \
+  ""
 
 echo "Validated promoted default normal boot selection."
-echo "  promoted_rootfs: $PROMOTED_ROOTFS_IMAGE"
-echo "  promoted_kernel: $PROMOTED_KERNEL_IMAGE"
+echo "  promoted_rootfs: $RESOLVED_PROMOTED_ROOTFS_IMAGE"
+echo "  promoted_kernel: $RESOLVED_PROMOTED_KERNEL_IMAGE"

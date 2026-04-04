@@ -119,7 +119,7 @@ This disk is used for large durable state that is convenient to keep separate fr
 ### Disk helpers
 
 - `scripts/ensure-root-disk.sh`
-  Seeds `qemu/slopos-root.img` from `artifacts/buildroot-output/images/rootfs.ext4` if it does not exist yet.
+  Seeds `qemu/slopos-root.img` from the current default rootfs source when it is created or reset, and records the exact paired rootfs+kernel generation in a sibling `*.boot-selection.toml` file so later boots reuse that same pair until the root disk is reset again.
 
 - `scripts/ensure-persistent-disk.sh`
   Creates or resizes the separate data disk image and formats it as ext4.
@@ -186,14 +186,24 @@ The companion
 back to the host, runs the existing isolated normal-image validator against it,
 and publishes the validated result to
 `artifacts/guest-rootfs-candidate/current/rootfs.ext4` for explicit host-side
-boot handoff testing. `scripts/validate-guest-rootfs-boot-candidate.sh` then
+boot handoff testing. That export now also writes
+`artifacts/guest-rootfs-candidate/current/host-handoff.toml` with the copied
+image SHA-256, copied manifest SHA-256, guest manifest schema version, and both
+the final `seal_method` plus the staged `staged_seal_method` that the guest
+recorded before any host compatibility fallback. `scripts/validate-guest-rootfs-boot-candidate.sh` then
 boots `run-phase2.sh` through that host-side candidate path with
 `ROOTFS_SOURCE_IMAGE=...` plus `RESET_ROOT_DISK=1`, while still keeping the
 Buildroot kernel, so the opt-in handoff can be proven before any broader
 promotion. `scripts/validate-guest-combined-boot-candidate.sh` then combines
 that rootfs candidate with
 `KERNEL_IMAGE=artifacts/guest-kernel-candidate/current/Image` to prove the full
-guest-built kernel+rootfs opt-in boot path.
+guest-built kernel+rootfs opt-in boot path. The combined validator now rejects
+stale or mismatched host handoff metadata before it ever boots the temporary VM.
+The kernel side now stages versioned input bundles under
+`/Volumes/slopos-data/kernel/input/<bundle>/`, records source provenance in
+`kernel-inputs.toml`, and requires the schema-2 guest kernel manifest to carry
+`staged_input_metadata`, `staged_input_root_manifest`, and
+`staged_patch_manifest`.
 
 `scripts/audit-guest-ext4-sealing.sh` stages and runs the checked-in guest
 helper `/usr/sbin/slopos-audit-ext4-sealing-prereqs`, copies the resulting
@@ -208,13 +218,20 @@ verifies the resulting manifest records `seal_method = "guest-mke2fs-d"`.
 
 `scripts/promote-guest-boot-default.sh` then copies the current host-side guest
 rootfs and kernel candidates into `artifacts/guest-boot-promoted/current/`
-without overwriting any Buildroot output. When that promoted path exists,
-`ensure-root-disk.sh` and `run-phase2.sh` use it as the default normal boot
-source unless the caller explicitly sets `ROOTFS_SOURCE_IMAGE=...` or
-`KERNEL_IMAGE=...`. `scripts/validate-promoted-boot-default.sh` proves that
-default-selection behavior through a temporary VM, and
-`scripts/promote-guest-boot-default.sh --clear` removes the promoted default so
-future boots fall back to the Buildroot artifacts again.
+without overwriting any Buildroot output. It also copies the candidate
+`host-handoff.toml` files forward and writes `promotion.toml` with the promoted
+rootfs/kernel image and manifest SHA-256 values for the paired default boot
+selection, plus the promoted kernel `System.map` and resolved `linux.config`
+hashes. When that promoted path exists, new or reset root disks use that
+resolved promoted pair by default unless the caller explicitly sets
+`ROOTFS_SOURCE_IMAGE=...` or `KERNEL_IMAGE=...`. Existing root disks now keep
+booting the exact pair recorded in their sibling `*.boot-selection.toml`
+metadata, so clearing `current/` only affects future reseeds.
+`scripts/validate-promoted-boot-default.sh` proves that default-selection
+behavior through a temporary VM and verifies that the promoted hashes still
+match the copied artifacts on disk, and `scripts/promote-guest-boot-default.sh --clear`
+removes the promoted default so future boots fall back to the Buildroot
+artifacts again.
 
 The older `scripts/build-selfhost-*.sh` helpers are now best treated as fallback/manual debugging tools. The supported steady-state toolchain workflow is the package-managed path:
 
@@ -259,16 +276,19 @@ Important files under `artifacts/buildroot-output/`:
 
 Important guest-native kernel artifact paths under `/Volumes/slopos-data/kernel/`:
 
-- `input/current/` - staged defconfig, kernel config, patch dir, and source tarball
-- `artifacts/<kernelrelease>-<timestamp>/` - versioned guest-built `Image`, modules, inputs, and manifest
+- `input/<bundle>/` - versioned staged kernel input bundle with the defconfig, kernel config, patch dir, source tarball, and `kernel-inputs.toml` provenance file
+- `input/current/` - symlink to the latest staged kernel input bundle
+- `artifacts/<kernelrelease>-<timestamp>/` - versioned guest-built `Image`, `modules.tar.xz`, installed modules tree, inputs, and manifest
 - `artifacts/current` - symlink to the latest validated guest-built kernel artifact set
 - `logs/` - guest-native kernel build logs
 
 Important host-side guest-kernel handoff paths under `artifacts/guest-kernel-candidate/`:
 
 - `current/Image` - latest guest-built kernel image copied back for opt-in host boot tests
+- `current/modules.tar.xz` - packaged modules payload copied back alongside that kernel image
 - `current/manifest.toml` - copied guest artifact manifest for that kernel candidate
-- `current/host-handoff.toml` - host-side provenance for when the candidate was promoted
+- `current/System.map` / `current/linux.config` - copied support files for validating the promoted kernel contract
+- `current/host-handoff.toml` - host-side provenance for when the candidate was promoted, including copied Image/modules/manifest/System.map/linux.config SHA-256 values, manifest schema version, and `kernel_release`
 
 Important host-side ext4 audit paths under `artifacts/guest-ext4-sealing-audit/`:
 
@@ -287,13 +307,13 @@ Important host-side guest-rootfs handoff paths under `artifacts/guest-rootfs-can
 
 - `current/rootfs.ext4` - latest validated guest-built rootfs image copied back for opt-in host boot tests
 - `current/manifest.toml` - copied guest artifact manifest for that candidate image
-- `current/host-handoff.toml` - host-side provenance for when the candidate was validated and promoted
+- `current/host-handoff.toml` - host-side provenance for when the candidate was validated and promoted, including copied image/manifest SHA-256 values, manifest schema version, and the final/staged seal methods
 
 Important host-side promoted-default boot paths under `artifacts/guest-boot-promoted/`:
 
 - `current/rootfs.ext4` - promoted default rootfs seed image used when no explicit override is set
 - `current/Image` - promoted default kernel image used when no explicit override is set
-- `current/promotion.toml` - host-side provenance for the paired promoted default
+- `current/promotion.toml` - host-side provenance for the paired promoted default, including promoted image/manifest SHA-256 values for both rootfs and kernel
 
 Important files under `artifacts/buildroot-recovery-output/`:
 
@@ -1063,14 +1083,15 @@ guest helper `/usr/sbin/slopos-build-kernel-artifacts`.
 
 The guest helper builds `Image` and modules natively with the current managed
 toolchain, validates that the built `Image` exists and that module installation
-produced a non-empty `lib/modules/<kernelrelease>/` tree, records the staged
-input files alongside the output, writes a manifest plus build log, and updates
+produced a non-empty `lib/modules/<kernelrelease>/` tree, packages that module
+tree as `modules.tar.xz`, records the staged input files alongside the output,
+writes a schema-3 manifest plus build log, and updates
 `/Volumes/slopos-data/kernel/artifacts/current` to the latest successful build.
 
 `scripts/promote-guest-kernel-candidate.sh` then copies the current guest
-artifact's `Image`, `System.map`, resolved `linux.config`, and manifest back to
-`artifacts/guest-kernel-candidate/<artifact>/`, records host-side provenance,
-and refreshes `artifacts/guest-kernel-candidate/current` for later boot
+artifact's `Image`, `modules.tar.xz`, `System.map`, resolved `linux.config`,
+and manifest back to `artifacts/guest-kernel-candidate/<artifact>/`, records
+host-side provenance, and refreshes `artifacts/guest-kernel-candidate/current` for later boot
 handoff testing.
 
 The resulting persistent layout is:
@@ -1118,7 +1139,17 @@ label and size. The tar staging path stays intentionally uncompressed so the
 seeded guest-native builder does not depend on a seeded `gzip` binary or Python
 compression stdlib modules. The host/Lima wrapper still retains the old sealing
 path as a compatibility fallback for older guests that have not yet been
-reseeded onto that new image.
+reseeded onto that new image, but that fallback is now explicit: set
+`ALLOW_HOST_ROOTFS_SEAL_FALLBACK=0` to fail instead of silently resealing on
+the host.
+
+The guest rootfs artifact manifest now records more of that contract directly:
+
+- the staged `normal-post-fakeroot.sh` assembly hook and its SHA-256
+- deterministic manifests for the staged `normal-rootfs-tree/` and
+  `rootfs-overlay/` inputs
+- both the guest-produced seal state (`staged_seal_method`) and the final seal
+  state (`seal_method`), so host fallback remains auditable instead of implicit
 
 The checked-in ext4 audit path now makes the transition boundary concrete:
 
@@ -1144,13 +1175,18 @@ The validated guest-built image is still a host-side handoff artifact first.
 `scripts/validate-guest-rootfs-artifacts.sh` copies the latest guest-built image
 back to the host, runs the existing BusyBox-less/isolated-boot checks against
 it, and promotes the validated result into
-`artifacts/guest-rootfs-candidate/current/`. A host boot can then opt into that
+`artifacts/guest-rootfs-candidate/current/`. That handoff directory now also
+includes `host-handoff.toml`, which records the copied image/manifest SHA-256
+values, the guest manifest `schema_version`, and both the final
+`seal_method` plus the original `staged_seal_method`. A host boot can then opt into that
 candidate explicitly with
 `ROOTFS_SOURCE_IMAGE=artifacts/guest-rootfs-candidate/current/rootfs.ext4` plus
 `RESET_ROOT_DISK=1`. `scripts/validate-guest-rootfs-boot-candidate.sh` is the
 targeted proof for that explicit host handoff path: it boots a temporary root
 disk through `run-phase2.sh`, verifies that the reseed came from the candidate
-image, and then reruns the live normal-seed contract checks over SSH.
+image, and then reruns the live normal-seed contract checks over SSH. The
+validator now also refuses to boot when the copied candidate hashes or schema
+metadata do not match the handoff file.
 
 `scripts/validate-guest-combined-boot-candidate.sh` extends that proof to the
 full combined handoff path. It boots a temporary VM through `run-phase2.sh`
@@ -1158,23 +1194,34 @@ with both `ROOTFS_SOURCE_IMAGE=artifacts/guest-rootfs-candidate/current/rootfs.e
 and `KERNEL_IMAGE=artifacts/guest-kernel-candidate/current/Image`, verifies the
 temporary root disk reseed and selected kernel path from the boot log, checks
 that `uname -r` matches the guest-kernel candidate manifest, and then reruns
-the live normal-seed contract over SSH.
+the live normal-seed contract over SSH. Before boot, it now rejects stale
+rootfs/kernel handoff metadata so the host-side candidate pair stays auditable.
+On the kernel side that now includes the candidate `System.map`, resolved
+`linux.config`, and the schema-2 kernel input provenance entries.
 
 Once that explicit combined handoff is trusted, `scripts/promote-guest-boot-default.sh`
 can copy the current host-side candidates into
 `artifacts/guest-boot-promoted/current/` as a paired default boot source without
 overwriting `artifacts/buildroot-output/images/`. From that point on,
-`ensure-root-disk.sh` and `run-phase2.sh` will use the promoted `rootfs.ext4`
-and `Image` by default whenever the caller does not provide explicit
-`ROOTFS_SOURCE_IMAGE` or `KERNEL_IMAGE` overrides. The companion
+`ensure-root-disk.sh` will seed new or reset root disks from the resolved
+promoted `rootfs.ext4` and record that exact rootfs+kernel generation in a
+sibling `*.boot-selection.toml` file. `run-phase2.sh` reuses that recorded
+kernel for later boots of the same root disk, so the promoted default behaves
+like one atomic handoff instead of two independent lookups. The companion
 `scripts/validate-promoted-boot-default.sh` boots a temporary VM with no
 explicit boot overrides and proves from the boot log that the promoted default
-pair was selected. `scripts/promote-guest-boot-default.sh --clear` removes the
-current promoted symlink and returns default selection to the Buildroot rootfs
-and kernel artifacts. `scripts/validate-promoted-boot-rollback.sh` uses an
-isolated temporary `HOST_GUEST_PROMOTED_BOOT_ROOT`, proves the promoted pair
-boots as the default, clears that isolated promotion, and then proves a fresh
-no-override boot falls back to `artifacts/buildroot-output/images/`.
+pair was selected. The promoted directory also carries forward
+`rootfs.host-handoff.toml`, `kernel.host-handoff.toml`, and a `promotion.toml`
+whose hash fields must match the copied promoted artifacts, including the
+promoted kernel `System.map` and resolved `linux.config`. `scripts/promote-guest-boot-default.sh --clear`
+removes the current promoted symlink so future reseeds return to the Buildroot
+rootfs and kernel artifacts, while already-seeded root disks keep using their
+recorded pair until they are reset. `scripts/validate-promoted-boot-default.sh`
+checks both the boot selection and the recorded root-disk metadata contract.
+`scripts/validate-promoted-boot-rollback.sh` uses an isolated temporary
+`HOST_GUEST_PROMOTED_BOOT_ROOT`, proves the promoted pair boots as the default,
+clears that isolated promotion, and then proves a fresh no-override boot falls
+back to `artifacts/buildroot-output/images/`.
 
 ## System ownership boundary
 

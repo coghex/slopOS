@@ -6,6 +6,17 @@ HOST_ROOTFS_CANDIDATE_ROOT="${HOST_GUEST_ROOTFS_CANDIDATE_ROOT:-$ROOT_DIR/artifa
 HOST_KERNEL_CANDIDATE_ROOT="${HOST_GUEST_KERNEL_CANDIDATE_ROOT:-$ROOT_DIR/artifacts/guest-kernel-candidate}"
 HOST_PROMOTED_BOOT_ROOT="${HOST_GUEST_PROMOTED_BOOT_ROOT:-$ROOT_DIR/artifacts/guest-boot-promoted}"
 
+sha256_file() {
+  python3 - "$1" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+print(hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+}
+
 usage() {
   cat <<'EOF'
 Usage: ./scripts/promote-guest-boot-default.sh [--clear]
@@ -61,15 +72,19 @@ kernel_candidate_manifest="$HOST_KERNEL_CANDIDATE_ROOT/current/manifest.toml"
 kernel_candidate_handoff="$HOST_KERNEL_CANDIDATE_ROOT/current/host-handoff.toml"
 kernel_candidate_system_map="$HOST_KERNEL_CANDIDATE_ROOT/current/System.map"
 kernel_candidate_config="$HOST_KERNEL_CANDIDATE_ROOT/current/linux.config"
+kernel_candidate_modules_archive="$HOST_KERNEL_CANDIDATE_ROOT/current/modules.tar.xz"
 kernel_candidate_module_symvers="$HOST_KERNEL_CANDIDATE_ROOT/current/Module.symvers"
 
 for required in \
   "$rootfs_candidate_image" \
   "$rootfs_candidate_manifest" \
+  "$rootfs_candidate_handoff" \
   "$kernel_candidate_image" \
   "$kernel_candidate_manifest" \
+  "$kernel_candidate_handoff" \
   "$kernel_candidate_system_map" \
-  "$kernel_candidate_config"; do
+  "$kernel_candidate_config" \
+  "$kernel_candidate_modules_archive"; do
   if [[ ! -f "$required" ]]; then
     echo "Missing required candidate artifact: $required" >&2
     exit 1
@@ -101,16 +116,43 @@ cp "$kernel_candidate_system_map" "$promotion_dir/System.map.tmp"
 mv "$promotion_dir/System.map.tmp" "$promotion_dir/System.map"
 cp "$kernel_candidate_config" "$promotion_dir/linux.config.tmp"
 mv "$promotion_dir/linux.config.tmp" "$promotion_dir/linux.config"
+cp "$kernel_candidate_modules_archive" "$promotion_dir/modules.tar.xz.tmp"
+mv "$promotion_dir/modules.tar.xz.tmp" "$promotion_dir/modules.tar.xz"
 if [[ -f "$kernel_candidate_module_symvers" ]]; then
   cp "$kernel_candidate_module_symvers" "$promotion_dir/Module.symvers.tmp"
   mv "$promotion_dir/Module.symvers.tmp" "$promotion_dir/Module.symvers"
+fi
+
+rootfs_image_sha="$(sha256_file "$promotion_dir/rootfs.ext4")"
+rootfs_manifest_sha="$(sha256_file "$promotion_dir/rootfs.manifest.toml")"
+kernel_image_sha="$(sha256_file "$promotion_dir/Image")"
+kernel_manifest_sha="$(sha256_file "$promotion_dir/kernel.manifest.toml")"
+kernel_system_map_sha="$(sha256_file "$promotion_dir/System.map")"
+kernel_resolved_config_sha="$(sha256_file "$promotion_dir/linux.config")"
+kernel_modules_archive_sha="$(sha256_file "$promotion_dir/modules.tar.xz")"
+kernel_module_symvers_fields=""
+if [[ -f "$promotion_dir/Module.symvers" ]]; then
+  kernel_module_symvers_sha="$(sha256_file "$promotion_dir/Module.symvers")"
+  kernel_module_symvers_fields="
+kernel_module_symvers_sha256 = \"$kernel_module_symvers_sha\""
 fi
 
 cat >"$promotion_dir/promotion.toml" <<EOF
 promoted_at = "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 promoted_by = "scripts/promote-guest-boot-default.sh"
 rootfs_candidate = "$rootfs_candidate_image"
+rootfs_candidate_manifest = "$rootfs_candidate_manifest"
+rootfs_candidate_handoff = "$rootfs_candidate_handoff"
+rootfs_image_sha256 = "$rootfs_image_sha"
+rootfs_manifest_sha256 = "$rootfs_manifest_sha"
 kernel_candidate = "$kernel_candidate_image"
+kernel_candidate_manifest = "$kernel_candidate_manifest"
+kernel_candidate_handoff = "$kernel_candidate_handoff"
+kernel_image_sha256 = "$kernel_image_sha"
+kernel_manifest_sha256 = "$kernel_manifest_sha"
+kernel_modules_archive_sha256 = "$kernel_modules_archive_sha"
+kernel_system_map_sha256 = "$kernel_system_map_sha"
+kernel_resolved_config_sha256 = "$kernel_resolved_config_sha"$kernel_module_symvers_fields
 default_boot = true
 EOF
 

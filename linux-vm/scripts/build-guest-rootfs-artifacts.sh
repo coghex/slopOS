@@ -18,6 +18,7 @@ TMPDIR_HOST=""
 ROOTFS_LABEL=""
 ROOTFS_SIZE=""
 OVERRIDE_GUEST_SSH_FORWARD_PORT="${GUEST_SSH_FORWARD_PORT:-}"
+ALLOW_HOST_ROOTFS_SEAL_FALLBACK="${ALLOW_HOST_ROOTFS_SEAL_FALLBACK:-1}"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "Missing host config: $CONFIG_FILE" >&2
@@ -122,6 +123,63 @@ EOF
   limactl shell --start "$INSTANCE" bash -lc "$shell_cmd"
 }
 
+update_guest_manifest_for_host_seal() {
+  local artifact_root="$1"
+  local image_name="$2"
+  local sealed_at="$3"
+
+  "$ROOT_DIR/scripts/ssh-guest.sh" bash -s -- "$artifact_root/manifest.toml" "$artifact_root/rootfs.ext4" "$image_name" "$sealed_at" <<'EOF'
+set -euo pipefail
+python3 - "$1" "$2" "$3" "$4" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+image_path = pathlib.Path(sys.argv[2])
+image_name = sys.argv[3]
+sealed_at = sys.argv[4]
+image_file_output = subprocess.check_output(["file", str(image_path)], text=True).strip().replace('"', '\\"')
+
+text = manifest_path.read_text(encoding="utf-8")
+lines = text.splitlines()
+updated = []
+replaced = set()
+
+replacements = {
+    "seal_method": f'seal_method = "host-mke2fs-d"',
+    "seal_required": "seal_required = false",
+    "image_name": f'image_name = "{image_name}"',
+    "image_file": f'image_file = "{image_file_output}"',
+}
+
+for line in lines:
+    stripped = line.strip()
+    key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
+    if key in replacements:
+        updated.append(replacements[key])
+        replaced.add(key)
+        continue
+    updated.append(line)
+
+for key in ("seal_method", "seal_required", "image_name", "image_file"):
+    if key not in replaced:
+        updated.append(replacements[key])
+
+if not any(line.startswith("host_seal_fallback = ") for line in updated):
+    updated.append("host_seal_fallback = true")
+if not any(line.startswith("host_seal_fallback_method = ") for line in updated):
+    updated.append('host_seal_fallback_method = "host-mke2fs-d"')
+if not any(line.startswith("host_seal_fallback_by = ") for line in updated):
+    updated.append('host_seal_fallback_by = "scripts/build-guest-rootfs-artifacts.sh"')
+if not any(line.startswith("host_seal_fallback_at = ") for line in updated):
+    updated.append(f'host_seal_fallback_at = "{sealed_at}"')
+
+manifest_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+PY
+EOF
+}
+
 cleanup() {
   if [[ -n "$TMPDIR_HOST" && -d "$TMPDIR_HOST" ]]; then
     rm -rf "$TMPDIR_HOST"
@@ -212,9 +270,18 @@ if [[ -z "$artifact_root" ]]; then
 fi
 
 if ! "$ROOT_DIR/scripts/ssh-guest.sh" "test -s '$artifact_root/rootfs.ext4'"; then
+  if [[ "$ALLOW_HOST_ROOTFS_SEAL_FALLBACK" != "1" ]]; then
+    echo "Guest rootfs artifact did not include rootfs.ext4 and host fallback is disabled." >&2
+    echo "Re-run with ALLOW_HOST_ROOTFS_SEAL_FALLBACK=1 only if you intentionally want the compatibility fallback." >&2
+    exit 1
+  fi
+
   "$ROOT_DIR/scripts/scp-from-guest.sh" "$artifact_root/rootfs-tree.tar" "$ASSEMBLED_ROOTFS_ARCHIVE"
   seal_rootfs_image "$ASSEMBLED_ROOTFS_ARCHIVE" "$SEALED_ROOTFS_IMAGE"
   "$ROOT_DIR/scripts/scp-to-guest.sh" "$SEALED_ROOTFS_IMAGE" "$artifact_root/rootfs.ext4"
+  update_guest_manifest_for_host_seal \
+    "$artifact_root" \
+    "rootfs.ext4" \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "Used host mke2fs -d compatibility fallback to seal guest rootfs artifact."
 fi
-
-"$ROOT_DIR/scripts/ssh-guest.sh" "if ! grep -q '^seal_method = ' '$artifact_root/manifest.toml'; then image_file_output=\$(file '$artifact_root/rootfs.ext4' | sed 's/\"/\\\\\"/g'); { printf 'seal_method = \"host-mke2fs-d\"\\n'; printf 'image_file = \"%s\"\\n' \"\$image_file_output\"; printf 'image_name = \"rootfs.ext4\"\\n'; printf 'seal_required = false\\n'; } >> '$artifact_root/manifest.toml'; fi"

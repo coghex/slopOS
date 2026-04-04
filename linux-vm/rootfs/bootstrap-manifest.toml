@@ -126,14 +126,16 @@ notes = [
 owner = "guest-native build workflow"
 input_contract = [
   "configs/slopos_aarch64_virt_defconfig defines the kernel version and points at the checked-in kernel config plus the Buildroot board patch directory.",
-  "scripts/build-guest-kernel-artifacts.sh stages that defconfig, buildroot-src/board/qemu/aarch64-virt/linux.config, buildroot-src/board/qemu/patches/linux, and the matching linux tarball into /Volumes/slopos-data/kernel/input/current before invoking the guest helper.",
-  "scripts/promote-guest-kernel-candidate.sh can then copy the current guest artifact's Image, manifest, and related metadata back into artifacts/guest-kernel-candidate/current on the host for explicit KERNEL_IMAGE=... boot selection.",
+  "scripts/build-guest-kernel-artifacts.sh now stages those inputs into a versioned /Volumes/slopos-data/kernel/input/<bundle>/ root, writes kernel-inputs.toml there with the host-side source provenance, and advances input/current to that explicit staged bundle before invoking the guest helper.",
+  "The guest helper records staged_input_metadata, a deterministic staged_input_root_manifest, a deterministic staged_patch_manifest, and a packaged modules.tar.xz output in the artifact manifest so the host can audit the exact input bundle and module payload that produced a kernel candidate.",
+  "scripts/promote-guest-kernel-candidate.sh can then copy the current guest artifact's Image, modules.tar.xz, manifest, and related metadata back into artifacts/guest-kernel-candidate/current on the host for explicit KERNEL_IMAGE=... boot selection.",
 ]
 persistent_root = "/Volumes/slopos-data/kernel"
 artifacts_root = "/Volumes/slopos-data/kernel/artifacts"
 notes = [
   "Guest-built kernel artifacts are validation outputs only for now; the authoritative normal boot kernel still comes from artifacts/buildroot-output/images/Image.",
-  "The guest helper writes a versioned artifact directory plus an artifacts/current symlink, stores Image and modules together, records the staged input config files, and emits a manifest plus build log for later inspection.",
+  "The guest helper writes a versioned artifact directory plus an artifacts/current symlink, stores Image, modules.tar.xz, and the installed module tree together, records the staged input metadata/config files, and emits a schema_version = 3 manifest plus build log for later inspection.",
+  "Host-side kernel candidate handoffs now record hashes for Image, modules.tar.xz, manifest.toml, System.map, linux.config, and optional Module.symvers so combined/promotion validators can reject stale copied metadata before boot.",
   "The new host-side guest-kernel candidate path is opt-in only: run-phase2.sh can boot from KERNEL_IMAGE=artifacts/guest-kernel-candidate/current/Image, but the default boot kernel does not change unless the caller requests it explicitly.",
 ]
 
@@ -142,8 +144,9 @@ owner = "guest-native build workflow"
 input_contract = [
   "The host stages a plain tar archive of the current Buildroot normal rootfs tree, plus board/normal-post-fakeroot.sh, board/normal-rootfs-tree, board/rootfs-overlay, configs/slopos_aarch64_virt_defconfig, and this bootstrap manifest under /Volumes/slopos-data/rootfs/input/current.",
   "The guest helper extracts that staged base tree, normalizes it back to root:root ownership, reruns the checked-in normal-post-fakeroot assembly logic, clears transient run/tmp state, and archives the assembled result as rootfs-tree.tar in the versioned artifact directory.",
+  "The rootfs artifact manifest now records the staged assembly hook itself plus deterministic manifests for the staged normal seed tree and mutable overlay so the host can audit exactly which checked-in inputs produced a candidate image.",
   "On the rebuilt seed image that now includes e2fsprogs, the guest helper seals rootfs.ext4 directly from that assembled tree with mke2fs -t ext4 -d and records the guest seal method in the manifest.",
-  "The host/Lima wrapper keeps the older seal path only as a compatibility fallback for guests that have not yet been reseeded onto the e2fsprogs-capable image.",
+  "The host/Lima wrapper keeps the older seal path only as a compatibility fallback for guests that have not yet been reseeded onto the e2fsprogs-capable image, and that fallback now updates the manifest explicitly instead of silently filling in missing seal metadata.",
 ]
 persistent_root = "/Volumes/slopos-data/rootfs"
 artifacts_root = "/Volumes/slopos-data/rootfs/artifacts"
@@ -159,8 +162,9 @@ owner = "host-side promotion flow"
 persistent_root = "artifacts/guest-boot-promoted"
 notes = [
   "scripts/promote-guest-boot-default.sh copies the current host-side guest rootfs and kernel candidates into artifacts/guest-boot-promoted/current without overwriting the Buildroot outputs.",
-  "ensure-root-disk.sh and run-phase2.sh treat that promoted current path as the default normal boot source unless the caller provides explicit ROOTFS_SOURCE_IMAGE or KERNEL_IMAGE overrides.",
-  "scripts/promote-guest-boot-default.sh --clear removes the current promoted default and returns default selection to the Buildroot artifacts.",
+  "When a normal root disk is created or reset, ensure-root-disk.sh now records the resolved rootfs+kernel pair that seeded it in a sibling *.boot-selection.toml file so later boots stay pinned to that exact generation until the root disk is reset again.",
+  "run-phase2.sh uses the current promoted pair as the default source only for new/reset root disks; existing root disks instead reuse their recorded boot-selection metadata unless the caller provides explicit ROOTFS_SOURCE_IMAGE or KERNEL_IMAGE overrides.",
+  "scripts/promote-guest-boot-default.sh --clear removes the current promoted default and returns future new/reset default selection to the Buildroot artifacts, while already-seeded root disks continue using their recorded pair until they are reseeded.",
   "scripts/validate-promoted-boot-rollback.sh can point HOST_GUEST_PROMOTED_BOOT_ROOT at an isolated temporary promotion root to prove that clearing a promotion returns default boot selection to the Buildroot artifacts without mutating the live promoted state.",
 ]
 

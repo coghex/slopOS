@@ -6,6 +6,8 @@ CONFIG_FILE="$ROOT_DIR/configs/host-guest.env"
 IDENTITY_PATH_FILE="$ROOT_DIR/qemu/guest-ssh-identity.path"
 HOST_CANDIDATE_ROOT="${HOST_GUEST_ROOTFS_CANDIDATE_ROOT:-$ROOT_DIR/artifacts/guest-rootfs-candidate}"
 CANDIDATE_IMAGE="${HOST_GUEST_ROOTFS_CANDIDATE_IMAGE:-$HOST_CANDIDATE_ROOT/current/rootfs.ext4}"
+CANDIDATE_MANIFEST="${HOST_GUEST_ROOTFS_CANDIDATE_MANIFEST:-$HOST_CANDIDATE_ROOT/current/manifest.toml}"
+CANDIDATE_HANDOFF="${HOST_GUEST_ROOTFS_CANDIDATE_HANDOFF:-$HOST_CANDIDATE_ROOT/current/host-handoff.toml}"
 DEFAULT_VALIDATE_SSH_PORT="$(python3 - <<'PY'
 import random
 import socket
@@ -57,15 +59,70 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-if [[ "$CANDIDATE_IMAGE" != /* ]]; then
-  CANDIDATE_IMAGE="$ROOT_DIR/$CANDIDATE_IMAGE"
-fi
+for var_name in CANDIDATE_IMAGE CANDIDATE_MANIFEST CANDIDATE_HANDOFF; do
+  var_value="${!var_name}"
+  if [[ "$var_value" != /* ]]; then
+    printf -v "$var_name" '%s/%s' "$ROOT_DIR" "$var_value"
+  fi
+done
 
-if [[ ! -f "$CANDIDATE_IMAGE" ]]; then
-  echo "Missing host-side guest rootfs candidate: $CANDIDATE_IMAGE" >&2
-  echo "Run ./scripts/validate-guest-rootfs-artifacts.sh first." >&2
-  exit 1
-fi
+for required in "$CANDIDATE_IMAGE" "$CANDIDATE_MANIFEST" "$CANDIDATE_HANDOFF"; do
+  if [[ ! -f "$required" ]]; then
+    echo "Missing host-side guest rootfs candidate input: $required" >&2
+    echo "Run ./scripts/validate-guest-rootfs-artifacts.sh first." >&2
+    exit 1
+  fi
+done
+
+python3 - "$CANDIDATE_IMAGE" "$CANDIDATE_MANIFEST" "$CANDIDATE_HANDOFF" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+image_path = pathlib.Path(sys.argv[1])
+manifest_path = pathlib.Path(sys.argv[2])
+handoff_path = pathlib.Path(sys.argv[3])
+
+def parse_toml(path: pathlib.Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        data[key] = value
+    return data
+
+manifest = parse_toml(manifest_path)
+handoff = parse_toml(handoff_path)
+
+required_manifest = {
+    "schema_version": "2",
+    "source_post_fakeroot": "normal-post-fakeroot.sh",
+    "normal_seed_tree_manifest": "normal-rootfs-tree.manifest",
+    "image_name": "rootfs.ext4",
+}
+for key, expected in required_manifest.items():
+    if manifest.get(key) != expected:
+        raise SystemExit(f"unexpected rootfs candidate manifest {key}: {manifest.get(key)!r} (expected {expected!r})")
+if "staged_seal_method" not in manifest:
+    raise SystemExit("rootfs candidate manifest is missing staged_seal_method")
+
+image_sha = hashlib.sha256(image_path.read_bytes()).hexdigest()
+manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+if handoff.get("image_name") != "rootfs.ext4":
+    raise SystemExit(f"unexpected handoff image_name: {handoff.get('image_name')!r}")
+if handoff.get("manifest_name") != "manifest.toml":
+    raise SystemExit(f"unexpected handoff manifest_name: {handoff.get('manifest_name')!r}")
+if handoff.get("image_sha256") != image_sha:
+    raise SystemExit("rootfs candidate handoff image_sha256 does not match candidate image")
+if handoff.get("manifest_sha256") != manifest_sha:
+    raise SystemExit("rootfs candidate handoff manifest_sha256 does not match candidate manifest")
+PY
 
 if [[ ! -f "$IDENTITY_PATH_FILE" ]]; then
   echo "Missing guest SSH identity path file: $IDENTITY_PATH_FILE" >&2
