@@ -452,10 +452,13 @@ with open(sys.argv[1], "rb") as fh:
     manifest = tomllib.load(fh)
 
 normal_seed_tree = manifest["normal_seed_tree"]
+etc_ownership = manifest["etc_ownership"]
 print(repr(normal_seed_tree["repo_owned_paths"]))
 print(repr(normal_seed_tree["mutable_overlay_paths"]))
 print(repr(normal_seed_tree["compatibility_symlinks"]))
 print(repr(normal_seed_tree["expected_empty_managed_prefixes"]))
+print(repr(etc_ownership["repo_owned_prefixes"]))
+print(repr(etc_ownership["buildroot_provided_paths"]))
 PY
   )"
   mapfile -t ownership_literal_lines <<<"$ownership_literals"
@@ -463,6 +466,8 @@ PY
   mutable_overlay_paths_literal="${ownership_literal_lines[1]}"
   compatibility_symlinks_literal="${ownership_literal_lines[2]}"
   expected_empty_managed_prefixes_literal="${ownership_literal_lines[3]}"
+  etc_repo_owned_prefixes_literal="${ownership_literal_lines[4]}"
+  etc_buildroot_provided_paths_literal="${ownership_literal_lines[5]}"
 
   mkdir -p "$ROOT_DIR/qemu"
   NORMAL_TMPDIR="$(mktemp -d "$ROOT_DIR/qemu/validate-busyboxless.XXXXXX")"
@@ -496,6 +501,8 @@ repo_owned_paths = $repo_owned_paths_literal
 mutable_overlay_paths = $mutable_overlay_paths_literal
 compatibility_symlinks = $compatibility_symlinks_literal
 expected_empty_managed_prefixes = $expected_empty_managed_prefixes_literal
+etc_repo_owned_prefixes = $etc_repo_owned_prefixes_literal
+etc_buildroot_provided_paths = $etc_buildroot_provided_paths_literal
 
 for unexpected in ("/bin/busybox", "/linuxrc", "/bin/ash"):
     if os.path.lexists(unexpected):
@@ -508,6 +515,14 @@ for required in ("/bin/sh", "/sbin/getty", "/usr/sbin/seedrng"):
 for required in repo_owned_paths:
     if not os.path.lexists(required):
         raise SystemExit(f"missing live repo-owned seed path: {required}")
+
+for required in etc_repo_owned_prefixes:
+    if not os.path.isdir(required):
+        raise SystemExit(f"missing live repo-owned /etc subtree: {required}")
+
+for required in etc_buildroot_provided_paths:
+    if not os.path.lexists(required):
+        raise SystemExit(f"missing live Buildroot-provided /etc path: {required}")
 
 for required in mutable_overlay_paths:
     if not os.path.lexists(required):

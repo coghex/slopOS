@@ -158,6 +158,7 @@ grep -Fq 'mke2fs_supports_populate_dir: yes' "$audit_report"
 
 GUEST_SSH_FORWARD_PORT="$VALIDATE_SSH_PORT" \
 KNOWN_HOSTS_FILE="$known_hosts_file" \
+ALLOW_HOST_ROOTFS_SEAL_FALLBACK=0 \
   "$ROOT_DIR/scripts/build-guest-rootfs-artifacts.sh" >/dev/null
 
 GUEST_SSH_FORWARD_PORT="$VALIDATE_SSH_PORT" \

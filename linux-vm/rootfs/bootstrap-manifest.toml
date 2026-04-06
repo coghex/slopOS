@@ -33,7 +33,7 @@ immutable_services = [
 notes = [
   "The seed image may ship baseline copies of tools that are later replaced or shadowed by persistent managed payloads.",
   "Recovery stays intentionally tiny and independent from the managed root world.",
-  "The current normal ext4 seed is not a repo-owned final tree yet: Buildroot still emits most of /bin, /sbin, /usr, /lib*, and base /etc, while the checked-in normal seed tree owns /init, /etc/inittab, S11-S20 boot glue, managed-path/profile glue, and the guest helper wrappers.",
+  "The current normal ext4 seed is not a repo-owned final tree yet: Buildroot still emits most of /bin, /sbin, /usr, /lib*, and the baseline /etc files listed under etc_ownership.buildroot_provided_paths, while the checked-in normal seed tree owns /init, /etc/inittab, S11-S20 boot glue, managed-path/profile glue, and the guest helper wrappers.",
   "board/normal-post-fakeroot.sh now explicitly installs the checked-in normal seed tree and mutable host-injected SSH authorization data into the final target tree, then normalizes BusyBox-free compatibility links such as /bin/sh, /sbin/getty, and /sbin/{ifup,ifdown}.",
   "A fresh seed image currently does not carry a prepopulated /usr/local tree; managed /usr/local ownership is restored later from persistent state and sloppkg-managed payloads.",
   "board/rootfs-overlay is now reserved for mutable host-provided seed inputs such as root/.ssh/authorized_keys rather than for the checked-in static boot glue.",
@@ -64,7 +64,6 @@ buildroot_owned_prefixes = [
   "/usr",
   "/lib",
   "/lib64",
-  "/etc",
 ]
 notes = [
   "board/normal-rootfs-tree is the checked-in static seed tree for the normal image.",
@@ -97,6 +96,7 @@ repo_owned_paths = [
   "/usr/sbin/slopos-sync-world",
   "/usr/sbin/slopos-validate-managed-world",
   "/usr/sbin/slopos-validate-rebuild-readiness",
+  "/usr/share/slopos/normal-post-fakeroot-prune.toml",
 ]
 mutable_overlay_paths = [
   "/root/.ssh/authorized_keys",
@@ -113,9 +113,28 @@ expected_empty_managed_prefixes = [
 post_fakeroot_actions = [
   "install the checked-in board/normal-rootfs-tree into the final target tree",
   "inject mutable board/rootfs-overlay/root/.ssh/authorized_keys when prepare-guest-ssh.sh has staged it",
-  "prune stale BusyBox symlinks and remove the unused /linuxrc entrypoint",
+  "prune the checked-in normal-post-fakeroot BusyBox cleanup manifest entries and remove the unused /linuxrc entrypoint",
   "normalize the /bin/sh, /sbin/getty, and /sbin/{ifup,ifdown} compatibility links",
   "prune stale init hooks when direct providers such as syslogd, crond, or util-linux tools are present",
+]
+
+[etc_ownership]
+repo_owned_prefixes = [
+  "/etc/default",
+  "/etc/init.d",
+  "/etc/profile.d",
+]
+buildroot_provided_paths = [
+  "/etc/group",
+  "/etc/passwd",
+  "/etc/shadow",
+  "/etc/shells",
+  "/etc/ssl",
+]
+notes = [
+  "The repo-owned part of /etc is now the explicit checked-in seed subtree under /etc/default, /etc/init.d, and /etc/profile.d plus the repo_owned_paths entries such as /etc/inittab and /etc/resolv.conf.static.",
+  "The listed buildroot_provided_paths are the current stage0 /etc substrate that the rebuilt normal image still expects Buildroot to seed before repo assembly and managed-world recovery take over.",
+  "The live normal-root validators enforce both sides of this split so /etc is no longer treated as one opaque Buildroot-owned prefix.",
 ]
 
 [managed_world]

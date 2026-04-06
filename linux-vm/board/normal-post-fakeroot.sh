@@ -4,6 +4,7 @@ set -euo pipefail
 TARGET_DIR="${1:?missing target dir}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NORMAL_SEED_TREE="$SCRIPT_DIR/normal-rootfs-tree"
+PRUNE_MANIFEST="$NORMAL_SEED_TREE/usr/share/slopos/normal-post-fakeroot-prune.toml"
 MUTABLE_OVERLAY_DIR="$SCRIPT_DIR/rootfs-overlay"
 MUTABLE_AUTHORIZED_KEYS="$MUTABLE_OVERLAY_DIR/root/.ssh/authorized_keys"
 BUSYBOX_BIN="$TARGET_DIR/bin/busybox"
@@ -14,7 +15,35 @@ if [[ ! -d "$NORMAL_SEED_TREE" ]]; then
   exit 1
 fi
 
-prune_busybox_link() {
+if [[ ! -f "$PRUNE_MANIFEST" ]]; then
+  echo "missing normal post-fakeroot prune manifest: $PRUNE_MANIFEST" >&2
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "missing required tool: python3" >&2
+  exit 1
+fi
+
+load_prune_manifest_list() {
+  local key="$1"
+
+  python3 - "$PRUNE_MANIFEST" "$key" <<'PY'
+import sys
+import tomllib
+
+manifest_path = sys.argv[1]
+key = sys.argv[2]
+
+with open(manifest_path, "rb") as fh:
+    manifest = tomllib.load(fh)
+
+for item in manifest[key]:
+    print(item)
+PY
+}
+
+prune_busybox_path() {
   local target="$1"
 
   if [[ ! -L "$target" ]]; then
@@ -29,14 +58,10 @@ prune_busybox_link() {
   ((removed += 1))
 }
 
-prune_any_busybox_link() {
+remove_path_if_present() {
   local target="$1"
 
-  if [[ ! -L "$target" ]]; then
-    return 0
-  fi
-
-  if [[ "$(readlink -f "$target")" != "$BUSYBOX_BIN" ]]; then
+  if [[ ! -e "$target" && ! -L "$target" ]]; then
     return 0
   fi
 
@@ -89,187 +114,15 @@ install_mutable_seed_inputs() {
 install_normal_seed_tree
 install_mutable_seed_inputs
 
-for target in \
-  "$TARGET_DIR/bin/arch" \
-  "$TARGET_DIR/bin/ash" \
-  "$TARGET_DIR/bin/base32" \
-  "$TARGET_DIR/bin/chattr" \
-  "$TARGET_DIR/bin/cpio" \
-  "$TARGET_DIR/bin/dmesg" \
-  "$TARGET_DIR/bin/dumpkmap" \
-  "$TARGET_DIR/bin/free" \
-  "$TARGET_DIR/bin/fdflush" \
-  "$TARGET_DIR/bin/getopt" \
-  "$TARGET_DIR/usr/bin/less" \
-  "$TARGET_DIR/bin/linux32" \
-  "$TARGET_DIR/bin/linux64" \
-  "$TARGET_DIR/bin/lsattr" \
-  "$TARGET_DIR/bin/more" \
-  "$TARGET_DIR/bin/mt" \
-  "$TARGET_DIR/bin/nuke" \
-  "$TARGET_DIR/bin/ping" \
-  "$TARGET_DIR/bin/pipe_progress" \
-  "$TARGET_DIR/bin/resume" \
-  "$TARGET_DIR/bin/run-parts" \
-  "$TARGET_DIR/bin/setpriv" \
-  "$TARGET_DIR/bin/setserial" \
-  "$TARGET_DIR/bin/setarch" \
-  "$TARGET_DIR/bin/su" \
-  "$TARGET_DIR/bin/usleep" \
-  "$TARGET_DIR/bin/vi" \
-  "$TARGET_DIR/usr/bin/which" \
-  "$TARGET_DIR/usr/bin/telnet" \
-  "$TARGET_DIR/usr/bin/traceroute" \
-  "$TARGET_DIR/usr/bin/nslookup" \
-  "$TARGET_DIR/usr/bin/bc" \
-  "$TARGET_DIR/usr/bin/[[" \
-  "$TARGET_DIR/usr/bin/ascii" \
-  "$TARGET_DIR/usr/bin/chrt" \
-  "$TARGET_DIR/usr/bin/chvt" \
-  "$TARGET_DIR/usr/bin/clear" \
-  "$TARGET_DIR/usr/bin/crc32" \
-  "$TARGET_DIR/usr/bin/dc" \
-  "$TARGET_DIR/usr/bin/deallocvt" \
-  "$TARGET_DIR/usr/bin/dos2unix" \
-  "$TARGET_DIR/usr/bin/eject" \
-  "$TARGET_DIR/usr/bin/fallocate" \
-  "$TARGET_DIR/usr/bin/flock" \
-  "$TARGET_DIR/usr/bin/fuser" \
-  "$TARGET_DIR/bin/gzip" \
-  "$TARGET_DIR/bin/gunzip" \
-  "$TARGET_DIR/bin/zcat" \
-  "$TARGET_DIR/usr/bin/getfattr" \
-  "$TARGET_DIR/usr/bin/hexedit" \
-  "$TARGET_DIR/usr/bin/hexdump" \
-  "$TARGET_DIR/usr/bin/ipcrm" \
-  "$TARGET_DIR/usr/bin/ipcs" \
-  "$TARGET_DIR/usr/bin/killall" \
-  "$TARGET_DIR/usr/bin/last" \
-  "$TARGET_DIR/usr/bin/logger" \
-  "$TARGET_DIR/usr/bin/lsof" \
-  "$TARGET_DIR/usr/bin/lspci" \
-  "$TARGET_DIR/usr/bin/lsscsi" \
-  "$TARGET_DIR/usr/bin/lsusb" \
-  "$TARGET_DIR/usr/bin/lzopcat" \
-  "$TARGET_DIR/usr/bin/mesg" \
-  "$TARGET_DIR/usr/bin/microcom" \
-  "$TARGET_DIR/usr/bin/mkpasswd" \
-  "$TARGET_DIR/usr/bin/openvt" \
-  "$TARGET_DIR/usr/bin/renice" \
-  "$TARGET_DIR/usr/bin/resize" \
-  "$TARGET_DIR/usr/bin/reset" \
-  "$TARGET_DIR/usr/bin/setfattr" \
-  "$TARGET_DIR/usr/bin/setkeycodes" \
-  "$TARGET_DIR/usr/bin/setsid" \
-  "$TARGET_DIR/usr/bin/sha3sum" \
-  "$TARGET_DIR/usr/bin/svc" \
-  "$TARGET_DIR/usr/bin/svok" \
-  "$TARGET_DIR/usr/bin/tftp" \
-  "$TARGET_DIR/usr/bin/crontab" \
-  "$TARGET_DIR/usr/bin/time" \
-  "$TARGET_DIR/usr/bin/ts" \
-  "$TARGET_DIR/usr/bin/tree" \
-  "$TARGET_DIR/usr/bin/unix2dos" \
-  "$TARGET_DIR/usr/bin/unlzop" \
-  "$TARGET_DIR/usr/bin/unzip" \
-  "$TARGET_DIR/usr/bin/uudecode" \
-  "$TARGET_DIR/usr/bin/uuencode" \
-  "$TARGET_DIR/usr/bin/uptime" \
-  "$TARGET_DIR/usr/bin/vlock" \
-  "$TARGET_DIR/usr/bin/xxd" \
-  "$TARGET_DIR/usr/sbin/addgroup" \
-  "$TARGET_DIR/usr/sbin/adduser" \
-  "$TARGET_DIR/usr/sbin/delgroup" \
-  "$TARGET_DIR/usr/sbin/deluser" \
-  "$TARGET_DIR/usr/sbin/dnsd" \
-  "$TARGET_DIR/usr/sbin/ether-wake" \
-  "$TARGET_DIR/usr/sbin/fbset" \
-  "$TARGET_DIR/usr/sbin/fdformat" \
-  "$TARGET_DIR/usr/sbin/fsfreeze" \
-  "$TARGET_DIR/usr/sbin/i2cdetect" \
-  "$TARGET_DIR/usr/sbin/i2cdump" \
-  "$TARGET_DIR/usr/sbin/i2cget" \
-  "$TARGET_DIR/usr/sbin/i2cset" \
-  "$TARGET_DIR/usr/sbin/i2ctransfer" \
-  "$TARGET_DIR/usr/sbin/inetd" \
-  "$TARGET_DIR/usr/sbin/loadfont" \
-  "$TARGET_DIR/usr/sbin/mim" \
-  "$TARGET_DIR/usr/sbin/nologin" \
-  "$TARGET_DIR/usr/sbin/partprobe" \
-  "$TARGET_DIR/usr/sbin/rdate" \
-  "$TARGET_DIR/usr/sbin/readprofile" \
-  "$TARGET_DIR/usr/sbin/setlogcons" \
-  "$TARGET_DIR/usr/sbin/ubirename"
-do
-  prune_busybox_link "$target"
+mapfile -t busybox_link_paths < <(load_prune_manifest_list busybox_link_paths)
+for path in "${busybox_link_paths[@]}"; do
+  prune_busybox_path "$TARGET_DIR$path"
 done
 
-for target in \
-  "$TARGET_DIR/bin/top" \
-  "$TARGET_DIR/bin/ps" \
-  "$TARGET_DIR/bin/w" \
-  "$TARGET_DIR/bin/watch" \
-  "$TARGET_DIR/bin/hostname" \
-  "$TARGET_DIR/bin/mount" \
-  "$TARGET_DIR/bin/mountpoint" \
-  "$TARGET_DIR/bin/umount" \
-  "$TARGET_DIR/sbin/fdisk" \
-  "$TARGET_DIR/sbin/blkid" \
-  "$TARGET_DIR/sbin/devmem" \
-  "$TARGET_DIR/sbin/freeramdisk" \
-  "$TARGET_DIR/sbin/fsck" \
-  "$TARGET_DIR/sbin/fstrim" \
-  "$TARGET_DIR/sbin/getty" \
-  "$TARGET_DIR/sbin/hdparm" \
-  "$TARGET_DIR/sbin/hwclock" \
-  "$TARGET_DIR/sbin/ifdown" \
-  "$TARGET_DIR/sbin/ifup" \
-  "$TARGET_DIR/sbin/insmod" \
-  "$TARGET_DIR/sbin/ip" \
-  "$TARGET_DIR/sbin/ipaddr" \
-  "$TARGET_DIR/sbin/iplink" \
-  "$TARGET_DIR/sbin/ipneigh" \
-  "$TARGET_DIR/sbin/iproute" \
-  "$TARGET_DIR/sbin/iprule" \
-  "$TARGET_DIR/sbin/iptunnel" \
-  "$TARGET_DIR/sbin/klogd" \
-  "$TARGET_DIR/sbin/loadkmap" \
-  "$TARGET_DIR/sbin/lsmod" \
-  "$TARGET_DIR/sbin/losetup" \
-  "$TARGET_DIR/sbin/makedevs" \
-  "$TARGET_DIR/sbin/mke2fs" \
-  "$TARGET_DIR/sbin/mkdosfs" \
-  "$TARGET_DIR/sbin/mkswap" \
-  "$TARGET_DIR/sbin/mdev" \
-  "$TARGET_DIR/sbin/modprobe" \
-  "$TARGET_DIR/sbin/pivot_root" \
-  "$TARGET_DIR/sbin/start-stop-daemon" \
-  "$TARGET_DIR/sbin/run-init" \
-  "$TARGET_DIR/sbin/runlevel" \
-  "$TARGET_DIR/sbin/rmmod" \
-  "$TARGET_DIR/sbin/setconsole" \
-  "$TARGET_DIR/sbin/sulogin" \
-  "$TARGET_DIR/sbin/swapoff" \
-  "$TARGET_DIR/sbin/swapon" \
-  "$TARGET_DIR/sbin/switch_root" \
-  "$TARGET_DIR/sbin/sysctl" \
-  "$TARGET_DIR/sbin/syslogd" \
-  "$TARGET_DIR/sbin/uevent" \
-  "$TARGET_DIR/sbin/udhcpc" \
-  "$TARGET_DIR/sbin/vconfig" \
-  "$TARGET_DIR/sbin/watchdog" \
-  "$TARGET_DIR/usr/sbin/killall5" \
-  "$TARGET_DIR/usr/sbin/crond"
-do
-  prune_any_busybox_link "$target"
+mapfile -t remove_paths < <(load_prune_manifest_list remove_paths)
+for path in "${remove_paths[@]}"; do
+  remove_path_if_present "$TARGET_DIR$path"
 done
-
-prune_any_busybox_link "$TARGET_DIR/linuxrc"
-
-if [[ -e "$BUSYBOX_BIN" || -L "$BUSYBOX_BIN" ]]; then
-  rm -f "$BUSYBOX_BIN"
-  ((removed += 1))
-fi
 
 if [[ -x "$TARGET_DIR/usr/sbin/ifup" ]]; then
   ln -snf /usr/sbin/ifup "$TARGET_DIR/sbin/ifup"

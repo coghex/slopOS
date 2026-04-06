@@ -213,8 +213,9 @@ still keep the rootfs workflow hybrid.
 
 `scripts/validate-guest-mke2fs-d-support.sh` boots a temporary VM from the
 current rebuilt seed image, proves that guest ext4 sealing is now available
-through `mke2fs -d`, builds a guest rootfs artifact on that temporary VM, and
-verifies the resulting manifest records `seal_method = "guest-mke2fs-d"`.
+through `mke2fs -d`, builds a guest rootfs artifact on that temporary VM with
+`ALLOW_HOST_ROOTFS_SEAL_FALLBACK=0`, and verifies the resulting manifest
+records `seal_method = "guest-mke2fs-d"`.
 
 `scripts/promote-guest-boot-default.sh` then copies the current host-side guest
 rootfs and kernel candidates into `artifacts/guest-boot-promoted/current/`
@@ -1180,7 +1181,8 @@ That transition is now proven end to end:
 2. run `scripts/validate-guest-mke2fs-d-support.sh` to prove the temporary
    guest audit reports `guest_native_ext4_ready: yes`
 3. confirm `scripts/build-guest-rootfs-artifacts.sh` records
-   `seal_method = "guest-mke2fs-d"` without needing the host fallback
+   `seal_method = "guest-mke2fs-d"` while `ALLOW_HOST_ROOTFS_SEAL_FALLBACK=0`
+   forbids the host rescue path
 4. keep kernel loop support only as a separate later option if the project
    still wants a second in-guest image-population strategy beyond `mke2fs -d`
 
@@ -1264,9 +1266,9 @@ Phase 12.
 
 Today, the built `rootfs.ext4` shows that:
 
-- Buildroot still emits the directory skeleton and most of `/bin`, `/sbin`, `/usr`, `/lib*`, and baseline `/etc`
+- Buildroot still emits the directory skeleton and most of `/bin`, `/sbin`, `/usr`, `/lib*`, plus the baseline `/etc` files and directories now listed under `etc_ownership.buildroot_provided_paths`
 - the checked-in normal seed tree currently contributes `/init`, `/etc/inittab`, `/etc/profile.d/00-managed-path.sh`, `/etc/resolv.conf.static`, `/usr/sbin/slopos-publish-http-repo`, `/usr/sbin/slopos-rebuild-world`, `/usr/sbin/slopos-sync-world`, `/usr/sbin/slopos-validate-managed-world`, `/usr/sbin/slopos-validate-rebuild-readiness`, and the `S11`-`S20` boot glue
-- `board/normal-post-fakeroot.sh` is now the explicit final-assembly hook for the normal image: it installs the checked-in seed tree, imports mutable `/root/.ssh/authorized_keys` data when present, removes stale BusyBox leftovers, removes the unused `/linuxrc` path, rewires `/bin/sh -> dash`, `/sbin/getty -> /sbin/agetty`, `/sbin/{ifup,ifdown} -> /usr/sbin/*`, and prunes a few stale init hooks when direct providers are present
+- `board/normal-post-fakeroot.sh` is now the explicit final-assembly hook for the normal image: it installs the checked-in seed tree, imports mutable `/root/.ssh/authorized_keys` data when present, consumes the checked-in `/usr/share/slopos/normal-post-fakeroot-prune.toml` contract to remove stale BusyBox leftovers and the unused `/linuxrc` path, rewires `/bin/sh -> dash`, `/sbin/getty -> /sbin/agetty`, `/sbin/{ifup,ifdown} -> /usr/sbin/*`, and prunes a few stale init hooks when direct providers are present
 - `board/rootfs-overlay/root/.ssh/authorized_keys` is now the only mutable host-injected build input under `board/rootfs-overlay/`; the checked-in static seed files live under `board/normal-rootfs-tree/` instead, and `scripts/build-guest-rootfs-artifacts.sh` now rejects unexpected extra files there when it synthesizes the staged mutable overlay bundle
 - `rootfs/bootstrap-manifest.toml` now also names the minimum `buildroot_seed_surface.critical_paths` that the extracted base archive must provide before the guest helper is allowed to apply repo-owned normal-rootfs assembly
 - a fresh seed image currently does **not** ship a populated `/usr/local`; managed `/usr/local` ownership is reintroduced later from persistent state by `sloppkg` and the boot-time reconnection hooks
@@ -1278,8 +1280,8 @@ the normal image can eventually follow recovery's lead and become a
 deliberately repo-owned final tree too.
 
 `rootfs/bootstrap-manifest.toml` now mirrors that boundary in machine-readable
-form through `buildroot_owned_prefixes`, `repo_owned_paths`,
-`mutable_overlay_paths`, `compatibility_symlinks`, and
+form through `buildroot_owned_prefixes`, `etc_ownership`,
+`repo_owned_paths`, `mutable_overlay_paths`, `compatibility_symlinks`, and
 `expected_empty_managed_prefixes`, so the rootfs validators can consume the same
 ownership contract instead of hardcoding it.
 
