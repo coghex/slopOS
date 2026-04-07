@@ -281,6 +281,7 @@ print(repr(normal_seed_tree["repo_owned_paths"]))
 print(repr(normal_seed_tree["mutable_overlay_paths"]))
 print(repr(normal_seed_tree["compatibility_symlinks"]))
 print(repr(normal_seed_tree["expected_empty_managed_prefixes"]))
+print(repr(manifest["buildroot_seed_surface"].get("disallowed_paths", [])))
 print(repr(etc_ownership["repo_owned_prefixes"]))
 print(repr(etc_ownership["buildroot_provided_paths"]))
 PY
@@ -290,8 +291,9 @@ repo_owned_paths_literal="${ownership_literal_lines[0]}"
 mutable_overlay_paths_literal="${ownership_literal_lines[1]}"
 compatibility_symlinks_literal="${ownership_literal_lines[2]}"
 expected_empty_managed_prefixes_literal="${ownership_literal_lines[3]}"
-etc_repo_owned_prefixes_literal="${ownership_literal_lines[4]}"
-etc_buildroot_provided_paths_literal="${ownership_literal_lines[5]}"
+disallowed_seed_paths_literal="${ownership_literal_lines[4]}"
+etc_repo_owned_prefixes_literal="${ownership_literal_lines[5]}"
+etc_buildroot_provided_paths_literal="${ownership_literal_lines[6]}"
 
 expected_kernel_release="$(python3 - "$KERNEL_CANDIDATE_MANIFEST" <<'PY'
 import sys
@@ -355,6 +357,7 @@ repo_owned_paths = $repo_owned_paths_literal
 mutable_overlay_paths = $mutable_overlay_paths_literal
 compatibility_symlinks = $compatibility_symlinks_literal
 expected_empty_managed_prefixes = $expected_empty_managed_prefixes_literal
+disallowed_seed_paths = $disallowed_seed_paths_literal
 etc_repo_owned_prefixes = $etc_repo_owned_prefixes_literal
 etc_buildroot_provided_paths = $etc_buildroot_provided_paths_literal
 expected_kernel_release = "$expected_kernel_release"
@@ -392,6 +395,10 @@ for required in etc_buildroot_provided_paths:
 for required in mutable_overlay_paths:
     if not os.path.lexists(required):
         raise SystemExit(f"missing live mutable seed path: {required}")
+
+for disallowed in disallowed_seed_paths:
+    if os.path.lexists(disallowed):
+        raise SystemExit(f"unexpected live disallowed seed path present: {disallowed}")
 
 for helper_path in repo_owned_paths:
     if not helper_path.startswith("/usr/sbin/slopos-"):

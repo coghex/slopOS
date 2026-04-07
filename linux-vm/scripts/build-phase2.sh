@@ -8,6 +8,7 @@ OUTPUT_DIR="$ROOT_DIR/artifacts/buildroot-output"
 DEFCONFIG_PATH="$ROOT_DIR/configs/slopos_aarch64_virt_defconfig"
 PRECHECK_SCRIPT="$ROOT_DIR/scripts/host-preflight.sh"
 JOBS="${BUILD_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 8)}"
+DEFCONFIG_HASH_FILE="$OUTPUT_DIR/.slopos-defconfig.sha256"
 
 for gnubin_dir in \
   /opt/homebrew/bin \
@@ -26,6 +27,16 @@ do
 done
 
 export PATH
+
+defconfig_sha256() {
+  python3 - "$DEFCONFIG_PATH" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+}
 
 shopt -s nullglob
 gcc_candidates=(/opt/homebrew/bin/gcc-[0-9]*)
@@ -67,6 +78,18 @@ fi
 
 "$PRECHECK_SCRIPT"
 
+current_defconfig_hash="$(defconfig_sha256)"
+if [[ -d "$OUTPUT_DIR" ]]; then
+  previous_defconfig_hash=""
+  if [[ -f "$DEFCONFIG_HASH_FILE" ]]; then
+    previous_defconfig_hash="$(<"$DEFCONFIG_HASH_FILE")"
+  fi
+  if [[ -z "$previous_defconfig_hash" || "$previous_defconfig_hash" != "$current_defconfig_hash" ]]; then
+    echo "Cleaning Buildroot output at $OUTPUT_DIR because the checked-in defconfig changed."
+    rm -rf "$OUTPUT_DIR"
+  fi
+fi
+
 mkdir -p "$OUTPUT_DIR"
 
 make -C "$BUILDROOT_DIR" \
@@ -83,6 +106,8 @@ make -C "$BUILDROOT_DIR" \
   HOSTCC="$HOST_GCC" \
   HOSTCXX="$HOST_GXX" \
   -j"$JOBS"
+
+printf '%s\n' "$current_defconfig_hash" >"$DEFCONFIG_HASH_FILE"
 
 initramfs_image="$OUTPUT_DIR/images/rootfs.cpio"
 if [[ -f "$OUTPUT_DIR/images/rootfs.cpio.gz" ]]; then

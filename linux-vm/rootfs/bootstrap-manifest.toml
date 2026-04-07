@@ -20,7 +20,7 @@ artifacts = [
 responsibilities = [
   "boot the kernel and mount the seeded root filesystem",
   "provide init, device bring-up, and first-boot shell/network baseline",
-  "provide HTTPS bootstrap transport through wget, Python ssl, and CA certificates",
+  "provide HTTPS bootstrap transport through Python ssl and CA certificates",
   "mount /Volumes/slopos-data and reconnect persistent state during boot",
   "run the S11-S16 boot glue that exposes the persistent toolchain, sloppkg, dropbear, ssh state, and runtime-library links",
 ]
@@ -47,10 +47,13 @@ critical_paths = [
   "/sbin/init",
   "/sbin/blkid",
   "/usr/bin/python3",
+]
+disallowed_paths = [
   "/usr/bin/wget",
 ]
 notes = [
   "These paths are the current minimum Buildroot-provided stage0 substrate that the repo-owned normal rootfs assembly still expects before persistent-state handoff and sloppkg recovery take over.",
+  "Seeded wget is now intentionally absent from the normal image; managed-world recovery supplies wget later under /usr/local/bin via selfhost-network when that networking slice is installed.",
   "slopos-build-rootfs-artifacts validates that each critical path exists in the extracted base rootfs archive before it applies the checked-in normal post-fakeroot assembly hook.",
 ]
 

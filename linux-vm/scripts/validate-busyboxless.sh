@@ -104,11 +104,13 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 normal_seed = manifest["normal_seed_tree"]
+buildroot_seed_surface = manifest["buildroot_seed_surface"]
 seed_tree = os.path.join(root, normal_seed["source"])
 assembly_hook = os.path.join(root, normal_seed["assembly_hook"])
 overlay_dir = os.path.join(root, normal_seed["mutable_input"])
 repo_owned_paths = sorted(normal_seed["repo_owned_paths"])
 mutable_overlay_paths = set(normal_seed["mutable_overlay_paths"])
+disallowed_seed_paths = set(buildroot_seed_surface.get("disallowed_paths", []))
 
 if not os.path.isdir(seed_tree):
     fail(f"missing normal seed tree directory: {seed_tree}")
@@ -156,6 +158,12 @@ if unexpected_overlay:
 if set(repo_owned_paths) & mutable_overlay_paths:
     fail("normal seed repo_owned_paths overlap mutable_overlay_paths")
 
+if set(repo_owned_paths) & disallowed_seed_paths:
+    fail("normal seed repo_owned_paths overlap buildroot_seed_surface.disallowed_paths")
+
+if mutable_overlay_paths & disallowed_seed_paths:
+    fail("mutable overlay paths overlap buildroot_seed_surface.disallowed_paths")
+
 print("normal seed tree/manifest validation passed")
 PY
 }
@@ -184,6 +192,7 @@ with open(os.path.join(repo_root, "rootfs", "bootstrap-manifest.toml"), "rb") as
     manifest = tomllib.load(fh)
 
 repo_owned_paths = manifest["normal_seed_tree"]["repo_owned_paths"]
+disallowed_seed_paths = manifest["buildroot_seed_surface"].get("disallowed_paths", [])
 
 def fail(message: str) -> None:
     print(message, file=sys.stderr)
@@ -203,6 +212,10 @@ for required in ("bin/sh", "sbin/getty", "usr/sbin/seedrng"):
 for required in repo_owned_paths:
     if not os.path.lexists(path(*required.lstrip("/").split("/"))):
         fail(f"normal artifact is missing repo-owned seed path {required}")
+
+for disallowed in disallowed_seed_paths:
+    if os.path.lexists(path(*disallowed.lstrip("/").split("/"))):
+        fail(f"normal artifact unexpectedly contains disallowed seed path {disallowed}")
 
 compatibility_links = {
     "/bin/sh": "dash",
@@ -435,6 +448,7 @@ run_normal_live_check() {
   local mutable_overlay_paths_literal
   local compatibility_symlinks_literal
   local expected_empty_managed_prefixes_literal
+  local disallowed_seed_paths_literal
   local ownership_literals
   local ownership_literal_lines
 
@@ -457,6 +471,7 @@ print(repr(normal_seed_tree["repo_owned_paths"]))
 print(repr(normal_seed_tree["mutable_overlay_paths"]))
 print(repr(normal_seed_tree["compatibility_symlinks"]))
 print(repr(normal_seed_tree["expected_empty_managed_prefixes"]))
+print(repr(manifest["buildroot_seed_surface"].get("disallowed_paths", [])))
 print(repr(etc_ownership["repo_owned_prefixes"]))
 print(repr(etc_ownership["buildroot_provided_paths"]))
 PY
@@ -466,8 +481,9 @@ PY
   mutable_overlay_paths_literal="${ownership_literal_lines[1]}"
   compatibility_symlinks_literal="${ownership_literal_lines[2]}"
   expected_empty_managed_prefixes_literal="${ownership_literal_lines[3]}"
-  etc_repo_owned_prefixes_literal="${ownership_literal_lines[4]}"
-  etc_buildroot_provided_paths_literal="${ownership_literal_lines[5]}"
+  disallowed_seed_paths_literal="${ownership_literal_lines[4]}"
+  etc_repo_owned_prefixes_literal="${ownership_literal_lines[5]}"
+  etc_buildroot_provided_paths_literal="${ownership_literal_lines[6]}"
 
   mkdir -p "$ROOT_DIR/qemu"
   NORMAL_TMPDIR="$(mktemp -d "$ROOT_DIR/qemu/validate-busyboxless.XXXXXX")"
@@ -501,6 +517,7 @@ repo_owned_paths = $repo_owned_paths_literal
 mutable_overlay_paths = $mutable_overlay_paths_literal
 compatibility_symlinks = $compatibility_symlinks_literal
 expected_empty_managed_prefixes = $expected_empty_managed_prefixes_literal
+disallowed_seed_paths = $disallowed_seed_paths_literal
 etc_repo_owned_prefixes = $etc_repo_owned_prefixes_literal
 etc_buildroot_provided_paths = $etc_buildroot_provided_paths_literal
 
@@ -527,6 +544,10 @@ for required in etc_buildroot_provided_paths:
 for required in mutable_overlay_paths:
     if not os.path.lexists(required):
         raise SystemExit(f"missing live mutable seed path: {required}")
+
+for disallowed in disallowed_seed_paths:
+    if os.path.lexists(disallowed):
+        raise SystemExit(f"unexpected live disallowed seed path present: {disallowed}")
 
 for helper_path in repo_owned_paths:
     if not helper_path.startswith("/usr/sbin/slopos-"):
