@@ -49,12 +49,22 @@ critical_paths = [
   "/usr/bin/python3",
 ]
 disallowed_paths = [
+  "/usr/bin/ar",
+  "/usr/bin/as",
   "/usr/bin/file",
   "/usr/bin/git",
+  "/usr/bin/ld",
+  "/usr/bin/ld.bfd",
   "/usr/bin/make",
+  "/usr/bin/nm",
+  "/usr/bin/objcopy",
+  "/usr/bin/objdump",
   "/usr/bin/patch",
   "/usr/bin/perl",
+  "/usr/bin/ranlib",
+  "/usr/bin/readelf",
   "/usr/bin/rsync",
+  "/usr/bin/strip",
   "/usr/bin/wget",
 ]
 notes = [
@@ -63,6 +73,7 @@ notes = [
   "Seeded file, make, patch, and perl are also intentionally absent from the normal image; later managed recovery supplies patch via selfhost-base and file, make, and perl via selfhost-devel under /usr/local/bin.",
   "Seeded git is also intentionally absent from the normal image because version-control tooling is not part of the current stage0 boot or recovery contract.",
   "Seeded rsync is also intentionally absent from the normal image because archive/sync tooling is not part of the current stage0 boot or recovery contract.",
+  "Seeded binutils target tools are also intentionally absent from the normal image; later managed recovery supplies assembler, linker, and related binutils entrypoints through selfhost-binutils/selfhost-toolchain under /usr/bin and /usr/local/bin once persistent state is restored.",
   "slopos-build-rootfs-artifacts validates that each critical path exists in the extracted base rootfs archive before it applies the checked-in normal post-fakeroot assembly hook.",
 ]
 

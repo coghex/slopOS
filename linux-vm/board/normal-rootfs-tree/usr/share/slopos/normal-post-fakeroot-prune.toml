@@ -173,4 +173,15 @@ busybox_link_paths = [
 
 remove_paths = [
   "/bin/busybox",
+  "/usr/bin/ar",
+  "/usr/bin/as",
+  "/usr/bin/ld",
+  "/usr/bin/ld.bfd",
+  "/usr/bin/nm",
+  "/usr/bin/objcopy",
+  "/usr/bin/objdump",
+  "/usr/bin/ranlib",
+  "/usr/bin/readelf",
+  "/usr/bin/rsync",
+  "/usr/bin/strip",
 ]
