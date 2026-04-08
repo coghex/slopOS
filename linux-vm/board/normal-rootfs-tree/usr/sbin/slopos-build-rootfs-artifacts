@@ -215,7 +215,7 @@ if [ -z "$BASE_ROOTFS_ARCHIVE" ]; then
   fi
 fi
 
-for tool in bash python3 tar sha256sum sed awk find chown mke2fs file; do
+for tool in bash python3 tar sha256sum sed awk find chown mke2fs; do
   require_exec "$tool"
 done
 
@@ -369,7 +369,9 @@ if supports_mke2fs_populate_dir; then
     echo "Built rootfs image is missing or empty: $ROOTFS_IMAGE" >&2
     exit 1
   fi
-  IMAGE_FILE_OUTPUT="$(file "$ROOTFS_IMAGE" | sed 's/"/\\"/g')"
+  if command -v file >/dev/null 2>&1; then
+    IMAGE_FILE_OUTPUT="$(file "$ROOTFS_IMAGE" | sed 's/"/\\"/g')"
+  fi
   SEAL_REQUIRED=0
   SEAL_METHOD="guest-mke2fs-d"
 fi

@@ -142,7 +142,7 @@ if [ -z "$KERNEL_SOURCE_ARCHIVE" ]; then
   fi
 fi
 
-for tool in gcc make perl bc bison flex m4 openssl tar xz patch sha256sum file find awk sed python3; do
+for tool in gcc make perl bc bison flex m4 openssl tar xz patch sha256sum find awk sed python3; do
   require_exec "$tool"
 done
 
@@ -331,7 +331,10 @@ if [ ! -s "$ARTIFACT_DIR/modules.tar.xz" ]; then
   echo "Packaged kernel modules archive is missing or empty: $ARTIFACT_DIR/modules.tar.xz" >&2
   exit 1
 fi
-IMAGE_FILE_OUTPUT="$(file "$ARTIFACT_DIR/Image" | sed 's/"/\\"/g')"
+IMAGE_FILE_OUTPUT=""
+if command -v file >/dev/null 2>&1; then
+  IMAGE_FILE_OUTPUT="$(file "$ARTIFACT_DIR/Image" | sed 's/"/\\"/g')"
+fi
 INPUT_METADATA_NAME="$(basename "$KERNEL_INPUT_METADATA_PATH")"
 INPUT_METADATA_SHA="$(sha256_file "$KERNEL_INPUT_METADATA_PATH")"
 INPUT_ROOT_MANIFEST_NAME="input-root.manifest"

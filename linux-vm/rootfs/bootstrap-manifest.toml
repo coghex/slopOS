@@ -50,6 +50,7 @@ critical_paths = [
 ]
 disallowed_paths = [
   "/usr/bin/file",
+  "/usr/bin/git",
   "/usr/bin/make",
   "/usr/bin/patch",
   "/usr/bin/perl",
@@ -59,6 +60,7 @@ notes = [
   "These paths are the current minimum Buildroot-provided stage0 substrate that the repo-owned normal rootfs assembly still expects before persistent-state handoff and sloppkg recovery take over.",
   "Seeded wget is now intentionally absent from the normal image; managed-world recovery supplies wget later under /usr/local/bin via selfhost-network when that networking slice is installed.",
   "Seeded file, make, patch, and perl are also intentionally absent from the normal image; later managed recovery supplies patch via selfhost-base and file, make, and perl via selfhost-devel under /usr/local/bin.",
+  "Seeded git is also intentionally absent from the normal image because version-control tooling is not part of the current stage0 boot or recovery contract.",
   "slopos-build-rootfs-artifacts validates that each critical path exists in the extracted base rootfs archive before it applies the checked-in normal post-fakeroot assembly hook.",
 ]
 
